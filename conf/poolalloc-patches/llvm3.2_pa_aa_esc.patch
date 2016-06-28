@@ -1,0 +1,2796 @@
+Index: lib/DSA/StdLibPass.cpp
+===================================================================
+--- lib/DSA/StdLibPass.cpp	(revision 175414)
++++ lib/DSA/StdLibPass.cpp	(working copy)
+@@ -6,8 +6,6 @@
+ //===----------------------------------------------------------------------===//
+ //
+ // Recognize common standard c library functions and generate graphs for them
+-// FIXME: Move table to separate analysis pass, so that even the Local Pass
+-// may query it.
+ //===----------------------------------------------------------------------===//
+ 
+ #include "llvm/ADT/Statistic.h"
+@@ -36,7 +34,6 @@
+ 
+ char StdLibDataStructures::ID;
+ 
+-#define numOps 10
+ namespace {
+   static cl::opt<bool> noStdLibFold("dsa-stdlib-no-fold",
+          cl::desc("Don't fold nodes in std-lib."),
+@@ -48,396 +45,7 @@
+          cl::init(false));
+ }
+ 
+-//
+-// Structure: libAction
+-//
+-// Description:
+-//  Describe how the DSGraph of a function should be built.  Note that for the
+-//  boolean arrays of arity numOps, the first element is a flag describing the
+-//  return value, and the remaining elements are flags describing the
+-//  function's arguments.
+-//
+-struct libAction {
+-  // The return value/arguments that should be marked read.
+-  bool read[numOps];
+ 
+-  // The return value/arguments that should be marked modified.
+-  bool write[numOps];
+-
+-  // The return value/arguments that should be marked as heap.
+-  bool heap[numOps];
+-
+-  // Flags whether the return value should be merged with all arguments.
+-  bool mergeNodes[numOps];
+-
+-  // Flags whether the return value and arguments should be folded.
+-  bool collapse;
+-};
+-
+-#define NRET_NARGS    {0,0,0,0,0,0,0,0,0,0}
+-#define YRET_NARGS    {1,0,0,0,0,0,0,0,0,0}
+-#define NRET_YARGS    {0,1,1,1,1,1,1,1,1,1}
+-#define YRET_YARGS    {1,1,1,1,1,1,1,1,1,1}
+-#define NRET_NYARGS   {0,0,1,1,1,1,1,1,1,1}
+-#define YRET_NYARGS   {1,0,1,1,1,1,1,1,1,1}
+-#define NRET_YNARGS   {0,1,0,0,0,0,0,0,0,0}
+-#define YRET_YNARGS   {1,1,0,0,0,0,0,0,0,0}
+-#define YRET_NNYARGS  {1,0,0,1,1,1,1,1,1,1}
+-#define YRET_YNYARGS  {1,1,0,1,1,1,1,1,1,1}
+-#define NRET_NNYARGS  {0,0,0,1,1,1,1,1,1,1}
+-#define YRET_NNYNARGS {1,0,0,1,0,0,0,0,0,0}
+-#define NRET_NNNYARGS {0,0,0,0,1,1,1,1,1,1}
+-
+-const struct {
+-  const char* name;
+-  libAction action;
+-} recFuncs[] = {
+-  {"stat",       {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fstat",      {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"lstat",      {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, false}},
+-  
+-  {"getenv",     {NRET_YNARGS, YRET_NARGS,  NRET_NARGS, NRET_NARGS,  false}},
+-  {"getrusage",  {NRET_YNARGS, YRET_NYARGS, NRET_NARGS, NRET_NARGS,  false}},
+-  {"getrlimit",  {NRET_YNARGS, YRET_NYARGS, NRET_NARGS, NRET_NARGS,  false}},
+-  {"setrlimit",  {NRET_YARGS,  YRET_NARGS,  NRET_NARGS, NRET_NARGS,  false}},
+-  {"getcwd",     {NRET_NYARGS, YRET_YNARGS, NRET_NARGS, YRET_YNARGS, false}},
+-  
+-  {"select",    {NRET_YARGS, YRET_YNARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"_setjmp",   {NRET_YARGS, YRET_YARGS,  NRET_NARGS, NRET_NARGS, false}},
+-  {"longjmp",   {NRET_YARGS, NRET_YARGS,  NRET_NARGS, NRET_NARGS, false}},
+-  
+-  {"remove",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"rename",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"unlink",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fileno",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"create",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"write",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"read",      {NRET_YARGS, YRET_YARGS, NRET_NARGS, NRET_NARGS, false}}, 
+-  {"truncate",  {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"open",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+- 
+-  {"chdir",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"mkdir",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"rmdir",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  
+-  {"chmod",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fchmod",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+- 
+-  {"kill",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pipe",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  
+-  {"execl",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"execlp",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"execle",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"execv",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"execvp",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+- 
+-  {"time",      {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, false}}, 
+-  {"times",     {NRET_YARGS,  YRET_YARGS, NRET_NARGS, NRET_NARGS, false}}, 
+-  {"ctime",     {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, false}}, 
+-  {"asctime",   {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, false}}, 
+-  {"utime",     {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, false}}, 
+-  {"localtime", {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, false}}, 
+-  {"gmtime",    {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, false}}, 
+-  {"ftime",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, false}}, 
+-
+-  // printf not strictly true, %n could cause a write
+-  {"printf",    {NRET_YARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS, false}},
+-  {"fprintf",   {NRET_YARGS,  NRET_YNARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fprintf",   {NRET_YARGS,  NRET_YNARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"sprintf",   {NRET_YARGS,  NRET_YNARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"snprintf",  {NRET_YARGS,  NRET_YNARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"vsnprintf", {NRET_YARGS,  YRET_YNARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"sscanf",    {NRET_YARGS,  YRET_NYARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"scanf",     {NRET_YARGS,  YRET_NYARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fscanf",    {NRET_YARGS,  YRET_NYARGS, NRET_NARGS, NRET_NARGS, false}},
+-
+-  {"calloc",    {NRET_NARGS, YRET_NARGS, YRET_NARGS,  NRET_NARGS, false}},
+-  {"malloc",    {NRET_NARGS, YRET_NARGS, YRET_NARGS,  NRET_NARGS, false}},
+-  {"valloc",    {NRET_NARGS, YRET_NARGS, YRET_NARGS,  NRET_NARGS, false}},
+-  {"realloc",   {NRET_NARGS, YRET_NARGS, YRET_YNARGS, YRET_YNARGS,false}},
+-  {"free",      {NRET_NARGS, NRET_NARGS, NRET_YNARGS, NRET_NARGS, false}},
+- 
+-  {"strdup",    {NRET_YARGS, YRET_NARGS, YRET_NARGS, YRET_YARGS, false}},
+-  {"__strdup",  {NRET_YARGS, YRET_NARGS, YRET_NARGS, YRET_YARGS, false}},
+-  {"wcsdup",    {NRET_YARGS, YRET_NARGS, YRET_NARGS, YRET_YARGS, false}},
+- 
+-  {"strlen",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"wcslen",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+- 
+-  {"atoi",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"atof",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"atol",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"atoll",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"atoq",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+- 
+-  {"memcmp",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"strcmp",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"wcscmp",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"strncmp",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"wcsncmp",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"strcasecmp",  {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"wcscasecmp",  {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"strncasecmp", {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"wcsncasecmp", {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  
+-  {"strcat",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, true}},
+-  {"strncat",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, true}},
+-  
+-  {"strcpy",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, true}},
+-  {"stpcpy",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, true}},
+-  {"wcscpy",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, true}},
+-  {"strncpy",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, true}},
+-  {"wcsncpy",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, true}},
+-  {"memcpy",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, true}},
+-  {"memccpy",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, true}},
+-  {"wmemccpy",   {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, true}},
+-  {"memmove",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, true}}, 
+-  
+-  {"bcopy",      {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_YARGS, true}},
+-  {"bcmp",       {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, true}},
+-  
+-  {"strerror",   {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  true}},
+-  {"clearerr",   {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS,  false}},
+-  {"strstr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, true}},
+-  {"wcsstr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, true}},
+-  {"strspn",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  true}},
+-  {"wcsspn",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  true}},
+-  {"strcspn",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  true}},
+-  {"wcscspn",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  true}},
+-  {"strtok",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YNARGS, true}},
+-  {"strpbrk",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, true}},
+-  {"wcspbrk",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, true}},
+-
+-  {"strchr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, true}},
+-  {"wcschr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, true}},
+-  {"strrchr",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, true}},
+-  {"wcsrchr",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, true}},
+-  {"strchrnul",  {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, true}},
+-  {"wcschrnul",  {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, true}},
+-
+-  {"memchr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, true}},
+-  {"wmemchr",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, true}},
+-  {"memrchr",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, true}},
+-
+-  {"memalign",   {NRET_NARGS, YRET_NARGS, YRET_NARGS,  NRET_NARGS, false}},
+-  //{"posix_memalign",  {NRET_YARGS, YRET_YNARGS, NRET_NARGS,  NRET_NARGS, false}},
+-
+-  {"perror",     {NRET_YARGS,  NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  
+-  {"feof",       {NRET_YARGS,  NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fflush",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fpurge",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fclose",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fopen",      {NRET_YARGS,  YRET_NARGS, YRET_NARGS, NRET_NARGS, false}},
+-  {"ftell",      {NRET_YARGS,  NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fseek",      {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, true}},
+-  {"rewind",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, true}},
+-  {"ferror",     {NRET_YARGS,  NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fwrite",     {NRET_YARGS,  NRET_NYARGS,NRET_NARGS, NRET_NARGS, false}},
+-  {"fread",      {NRET_NYARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fdopen",     {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-
+-  {"__errno_location", {NRET_NARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-
+-  {"puts",       {NRET_YARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS,  false}},
+-  {"gets",       {NRET_NARGS,  YRET_YARGS,  NRET_NARGS, YRET_YNARGS, false}},
+-  {"fgets",      {NRET_NYARGS, YRET_YNARGS, NRET_NARGS, YRET_YNARGS, false}},
+-  {"getc",       {NRET_YNARGS, YRET_YNARGS, NRET_NARGS, NRET_NARGS,  false}},
+-  {"ungetc",     {NRET_YNARGS, YRET_YARGS,  NRET_NARGS, NRET_NARGS,  false}},
+-  {"_IO_getc",   {NRET_YNARGS, YRET_YNARGS, NRET_NARGS, NRET_NARGS,  false}},
+-  {"fgetc",      {NRET_YNARGS, YRET_YNARGS, NRET_NARGS, NRET_NARGS,  false}},
+-  {"putc",       {NRET_NARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS,  false}},
+-  {"_IO_putc",   {NRET_NARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS,  false}},
+-  {"putchar",    {NRET_NARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS,  false}},
+-  {"fputs",      {NRET_YARGS,  NRET_NYARGS, NRET_NARGS, NRET_NARGS,  false}},
+-  {"fputc",      {NRET_YARGS,  NRET_NYARGS, NRET_NARGS, NRET_NARGS,  false}},
+-
+-  
+-  // SAFECode Intrinsics
+-  {"pool_init_logfile",{NRET_YNARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheck",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheckui",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheckstr",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheckstrui",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fastlscheck",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheckalign",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheckalignui", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheck_free",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheck_freeui", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"funccheck",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"funccheckui",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-
+-  {"poolcheck_debug",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheckui_debug",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheckstr_debug",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheckstrui_debug",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"fastlscheck_debug",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheckalign_debug",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheckalignui_debug", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheck_free_debug",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"poolcheck_freeui_debug", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"funccheck_debug",  {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"funccheckui_debug",{NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-
+-  {"pool_register_stack", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_unregister_stack", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_register_global", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_unregister_global", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_register", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_unregister", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_argvregister", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-
+-  {"pool_register_stack_debug", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_unregister_stack_debug", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_register_global_debug", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_unregister_global_debug", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_register_debug", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_unregister_debug", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-
+-  // CIF Intrinsics
+-  {"__if_pool_get_label", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"__if_pool_set_label", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  // CStdLib Runtime Wrapper Functions
+-  {"pool_strncpy",    {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  true}},
+-  {"pool_strcpy",     {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  true}},
+-  {"pool_stpcpy",     {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  true}},
+-  // strchr and index have same functionality
+-  {"pool_strchr",     {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   true}},
+-  {"pool_index",      {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   true}},
+-  // strrchr and rindex have same functionality
+-  {"pool_strrchr",    {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   true}},
+-  {"pool_rindex",     {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   true}},
+-  {"pool_strcat",     {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  true}},
+-  {"pool_strncat",    {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  true}},
+-  {"pool_strstr",     {NRET_NNYARGS, YRET_NARGS,    NRET_NARGS, YRET_NNYNARGS, true}},
+-  {"pool_strcasestr", {NRET_NNYARGS, YRET_NARGS,    NRET_NARGS, YRET_NNYNARGS, true}},
+-  {"pool_strpbrk",    {NRET_NNYARGS, YRET_NARGS,    NRET_NARGS, YRET_NNYNARGS, true}},
+-  {"pool_strspn",     {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, NRET_NARGS,    true}},
+-  {"pool_strcspn",    {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, NRET_NARGS,    true}},
+-  {"pool_memccpy",    {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  true}},
+-  {"pool_memchr",     {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   true}},
+-  {"pool_strcmp",     {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   false}},
+-  {"pool_strncmp",    {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   false}},
+-  {"pool_strlen",     {NRET_NYARGS,  NRET_NARGS,    NRET_NARGS, NRET_NARGS,   false}},
+-  {"pool_strnlen",    {NRET_NYARGS,  NRET_NARGS,    NRET_NARGS, NRET_NARGS,   false}},
+-  {"pool_memcmp",     {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   false}},
+-  {"pool_strcasecmp", {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   false}},
+-  {"pool_strncasecmp",{NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   false}},
+-  {"pool_bcopy",      {NRET_NNYARGS, NRET_NNNYARGS, NRET_NARGS, NRET_NNYARGS,  true}},
+-  {"pool_bcmp",       {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   false}},
+-  {"pool_read",       {NRET_NARGS,   NRET_YARGS,    NRET_NARGS, NRET_NARGS,   false}},
+-  {"pool_recv",       {NRET_NARGS,   NRET_YARGS,    NRET_NARGS, NRET_NARGS,   false}},
+-  {"pool_write",      {NRET_YARGS,   NRET_NARGS,    NRET_NARGS, NRET_NARGS,   false}},
+-  {"pool_send",       {NRET_YARGS,   NRET_NARGS,    NRET_NARGS, NRET_NARGS,   false}},
+-  {"pool_readlink",   {NRET_YNARGS,  NRET_NYARGS,   NRET_NARGS, NRET_NARGS,   true}},
+-  {"pool_realpath",   {NRET_YNARGS,  NRET_NYARGS,   NRET_NARGS, NRET_NARGS,   true}},
+-  {"pool_getcwd",     {NRET_YARGS,   NRET_NYARGS,   NRET_NARGS, YRET_NYARGS,  false}},
+-
+-  // format string intrinsics and functions
+-  {"sc.fsparameter",  {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"sc.fscallinfo",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"sc.fscallinfo_debug",{NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_printf",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_fprintf",    {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_sprintf",    {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_snprintf",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_err",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_errx",       {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_warn",       {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_warnx",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_syslog",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_scanf",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_fscanf",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool_sscanf",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool___printf_chk",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool___fprintf_chk",  {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool___sprintf_chk",  {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  {"pool___snprintf_chk", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-
+-  // Important C I/O functions
+-  {"pool_fgets",      {NRET_NNYARGS, YRET_YNYARGS,  NRET_NARGS, YRET_YNARGS,  true}},
+-  {"pool_fgets_debug",{NRET_NNYARGS, YRET_YNYARGS,  NRET_NARGS, YRET_YNARGS,  true}},
+-  
+-  // Type Checks
+-  {"trackArgvType",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackEnvpType",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackGlobal",          {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackArray",           {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackStoreInst",       {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackStringInput",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"compareTypeAndNumber", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"compareVAArgType",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"getTypeTag",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"checkType",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackInitInst",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackUnInitInst",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"copyTypeInfo",         {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"setTypeInfo",         {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"setVAInfo", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"copyVAInfo", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackctype",           {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackctype_32",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackStrcpyInst",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackStrcnpyInst",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackStrcatInst",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackgetcwd",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackgetpwuid",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackgethostname",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackgethostbyname",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackgetservbyname",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackgetaddrinfo",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackgetsockname",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackaccept",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackpoll",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackpipe",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-  {"trackReadLink",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   false}},
+-
+-#if 0
+-  {"wait",       {false, false, false, false,  true, false, false, false, false}},
+-#endif
+-
+-  // C++ functions, as mangled on linux gcc 4.2
+-  // operator new(unsigned long)
+-  {"_Znwm",      {NRET_NARGS, YRET_NARGS, YRET_NARGS, NRET_NARGS, false}},
+-  // operator new[](unsigned long)
+-  {"_Znam",      {NRET_NARGS, YRET_NARGS, YRET_NARGS, NRET_NARGS, false}},
+-  // operator new(unsigned int)
+-  {"_Znwj",      {NRET_NARGS, YRET_NARGS, YRET_NARGS, NRET_NARGS, false}},
+-  // operator new[](unsigned int)
+-  {"_Znaj",      {NRET_NARGS, YRET_NARGS, YRET_NARGS, NRET_NARGS, false}},
+-  // operator delete(void*)
+-  {"_ZdlPv",     {NRET_NARGS, NRET_NARGS, NRET_YNARGS,NRET_NARGS, false}},
+-  // operator delete[](void*)
+-  {"_ZdaPv",     {NRET_NARGS, NRET_NARGS, NRET_YNARGS, NRET_NARGS, false}},
+-  // flush
+-  {"_ZNSo5flushEv", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  // << operator
+-  {"_ZNSolsEd", {NRET_YARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, false}},
+-  // << operator
+-  {"_ZNSolsEPFRSoS_E", {NRET_YARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, false}},
+-  //endl
+-  {"_ZSt4endlIcSt11char_traitsIcEERSt13basic_ostreamIT_T0_ES6_", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-  // Added by Jingyue
+-  {"strtoll",       {NRET_YARGS, NRET_NYARGS, NRET_NYARGS, NRET_YARGS, false}},
+-  // Terminate the list of special functions recognized by this pass
+-  {0,            {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, false}},
+-};
+-
+-/*
+-   Functions to add
+-   freopen
+-   strftime
+-   strtoul
+-   strtol
+-   strtoll
+-   ctype family
+-   setbuf
+-   setvbuf
+-   __strpbrk_c3
+-   open64/fopen64/lseek64
+- */
+-
+ //
+ // Method: eraseCallsTo()
+ //
+@@ -453,37 +61,31 @@
+   DenseSet<RemovalPair> ToRemove;
+   for (Value::use_iterator ii = F->use_begin(), ee = F->use_end();
+        ii != ee; ++ii)
+-    if (CallInst* CI = dyn_cast<CallInst>(*ii)){
+-      if (CI->getCalledValue() == F) {
+-        DSGraph* Graph = getDSGraph(*CI->getParent()->getParent());
++    if (isa<CallInst>(*ii)||isa<InvokeInst>(*ii)){
++      CallSite CS(*ii);
++	  if (CS.getCalledValue() == F) {
++        DSGraph* Graph = getDSGraph(*CS.getCaller());
+         //delete the call
+         DEBUG(errs() << "Removing " << F->getName().str() << " from "
+-              << CI->getParent()->getParent()->getName().str() << "\n");
++              << CS.getCaller()->getName().str() << "\n");
+         ToRemove.insert(std::make_pair(Graph, F));
++		callgraph.erase(CS,F);
+       }
+-    }else if (InvokeInst* CI = dyn_cast<InvokeInst>(*ii)){
+-      if (CI->getCalledValue() == F) {
+-        DSGraph* Graph = getDSGraph(*CI->getParent()->getParent());
+-        //delete the call
+-        DEBUG(errs() << "Removing " << F->getName().str() << " from "
+-              << CI->getParent()->getParent()->getName().str() << "\n");
+-        ToRemove.insert(std::make_pair(Graph, F));
+-      }
+     } else if(ConstantExpr *CE = dyn_cast<ConstantExpr>(*ii)) {
+-      if(CE->isCast()) {
++      if(CE->isCast()) 
+         for (Value::use_iterator ci = CE->use_begin(), ce = CE->use_end();
+-             ci != ce; ++ci) {
+-          if (CallInst* CI = dyn_cast<CallInst>(*ci)){
+-            if(CI->getCalledValue() == CE) {
+-              DSGraph* Graph = getDSGraph(*CI->getParent()->getParent());
++             ci != ce; ++ci) 
++          if (isa<CallInst>(*ci)||isa<InvokeInst>(*ci)){
++            CallSite CS(*ci);
++	        if (CS.getCalledValue() == F) {
++              DSGraph* Graph = getDSGraph(*CS.getCaller());
+               //delete the call
+               DEBUG(errs() << "Removing " << F->getName().str() << " from "
+-                    << CI->getParent()->getParent()->getName().str() << "\n");
++                    << CS.getCaller()->getName().str() << "\n");
+               ToRemove.insert(std::make_pair(Graph, F));
++		      callgraph.erase(CS,F);
+             }
+           }
+-        }
+-      }
+     }
+ 
+   for(DenseSet<RemovalPair>::iterator I = ToRemove.begin(), E = ToRemove.end();
+@@ -545,6 +147,9 @@
+ 
+ bool
+ StdLibDataStructures::runOnModule (Module &M) {
++  
++  stdLibInfo.initialize(M);
++
+   //
+   // Get the results from the local pass.
+   //
+@@ -591,37 +196,38 @@
+     //
+     // Scan through the function summaries and process functions by summary.
+     //
+-    for (int x = 0; recFuncs[x].name; ++x) 
+-      if (Function* F = M.getFunction(recFuncs[x].name))
+-        if (F->isDeclaration()) {
+-          processFunction(x, F);
+-        }
++    for (Module::iterator I = M.begin(), E = M.end(); I!=E; ++I) {
++      if (I->isDeclaration()) {
++	    const StdLibInfo::LibAction* action = stdLibInfo.getLibActionForFunction(I);
++		if (action)
++			processFunction(I, *action);
++	  }
++	}
+ 
+     std::set<std::string>::iterator ai = AllocWrappersAnalysis->alloc_begin();
+     std::set<std::string>::iterator ae = AllocWrappersAnalysis->alloc_end();
+-    int x;
+-    for (x = 0; recFuncs[x].name; ++x) {
+-      if(recFuncs[x].name == std::string("malloc"))
+-        break;
+-    }
+ 
+-    for(;ai != ae; ++ai) {
+-      if(Function* F = M.getFunction(*ai))
+-        processFunction(x, F);
++	const StdLibInfo::LibAction *mallocAction =
++	  stdLibInfo.getLibActionForFunctionName("malloc");
++	assert(mallocAction);
++
++	for (;ai != ae; ++ai) {
++      if (Function* F = M.getFunction(*ai))
++        processFunction(F, *mallocAction);
+     }
+ 
+     ai = AllocWrappersAnalysis->dealloc_begin();
+     ae = AllocWrappersAnalysis->dealloc_end();
+-    for (x = 0; recFuncs[x].name; ++x) {
+-      if(recFuncs[x].name == std::string("free"))
+-        break;
+-    }
+ 
++	const StdLibInfo::LibAction * freeAction =
++	  stdLibInfo.getLibActionForFunctionName("free");
++	assert(freeAction);
++
+     for(;ai != ae; ++ai) {
+       if(Function* F = M.getFunction(*ai))
+-        processFunction(x, F);
++        processFunction(F, *freeAction);
+     }
+-
++	
+     //
+     // Merge return values and checked pointer values for SAFECode run-time
+     // checks.
+@@ -648,6 +254,7 @@
+   for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I)
+     if (!I->isDeclaration()) {
+       DSGraph * G = getDSGraph(*I);
++      DEBUG(G->AssertGraphOK());
+       unsigned EFlags = 0
+         | DSGraph::ResetExternal
+         | DSGraph::DontMarkFormalsExternal
+@@ -676,236 +283,124 @@
+ }
+ 
+ 
+-void StdLibDataStructures::processFunction(int x, Function *F) {
+-  for (Value::use_iterator ii = F->use_begin(), ee = F->use_end();
+-       ii != ee; ++ii)
+-    if (CallInst* CI = dyn_cast<CallInst>(*ii)){
+-      if (CI->getCalledValue() == F) {
+-        DSGraph* Graph = getDSGraph(*CI->getParent()->getParent());
+-
+-        //
+-        // Set the read, write, and heap markers on the return value
+-        // as appropriate.
+-        //
+-        if(isa<PointerType>((CI)->getType())){
+-          if(Graph->hasNodeForValue(CI)){
+-            if (recFuncs[x].action.read[0])
+-              Graph->getNodeForValue(CI).getNode()->setReadMarker();
+-            if (recFuncs[x].action.write[0])
+-              Graph->getNodeForValue(CI).getNode()->setModifiedMarker();
+-            if (recFuncs[x].action.heap[0])
+-              Graph->getNodeForValue(CI).getNode()->setHeapMarker();
+-          }
+-        }
+-
+-        //
+-        // Set the read, write, and heap markers on the actual arguments
+-        // as appropriate.
+-        //
+-        for (unsigned y = 0; y < CI->getNumArgOperands(); ++y)
+-          if (isa<PointerType>(CI->getArgOperand(y)->getType())){
+-            if (Graph->hasNodeForValue(CI->getArgOperand(y))){
+-              if (recFuncs[x].action.read[y + 1])
+-                Graph->getNodeForValue(CI->getArgOperand(y)).getNode()->setReadMarker();
+-              if (recFuncs[x].action.write[y + 1])
+-                Graph->getNodeForValue(CI->getArgOperand(y)).getNode()->setModifiedMarker();
+-              if (recFuncs[x].action.heap[y + 1])
+-                Graph->getNodeForValue(CI->getArgOperand(y)).getNode()->setHeapMarker();
+-            }
+-          }
+-
+-        //
+-        // Merge the DSNoes for return values and parameters as
+-        // appropriate.
+-        //
+-        std::vector<DSNodeHandle> toMerge;
+-        if (recFuncs[x].action.mergeNodes[0])
+-          if (isa<PointerType>(CI->getType()))
+-            if (Graph->hasNodeForValue(CI))
+-              toMerge.push_back(Graph->getNodeForValue(CI));
+-        for (unsigned y = 0; y < CI->getNumArgOperands(); ++y)
+-          if (recFuncs[x].action.mergeNodes[y + 1])
+-            if (isa<PointerType>(CI->getArgOperand(y)->getType()))
+-              if (Graph->hasNodeForValue(CI->getArgOperand(y)))
+-                toMerge.push_back(Graph->getNodeForValue(CI->getArgOperand(y)));
+-        for (unsigned y = 1; y < toMerge.size(); ++y)
+-          toMerge[0].mergeWith(toMerge[y]);
+-
+-        //
+-        // Collapse (fold) the DSNode of the return value and the actual
+-        // arguments if directed to do so.
+-        //
+-        if (!noStdLibFold && recFuncs[x].action.collapse) {
+-          if (isa<PointerType>(CI->getType())){
+-            if (Graph->hasNodeForValue(CI))
+-              Graph->getNodeForValue(CI).getNode()->foldNodeCompletely();
+-            NumNodesFoldedInStdLib++;
+-          }
+-          for (unsigned y = 0; y < CI->getNumArgOperands(); ++y){
+-            if (isa<PointerType>(CI->getArgOperand(y)->getType())){
+-              if (Graph->hasNodeForValue(CI->getArgOperand(y))){
+-                Graph->getNodeForValue(CI->getArgOperand(y)).getNode()->foldNodeCompletely();
+-                NumNodesFoldedInStdLib++;
+-              }
+-            }
+-          }
+-        }
++void StdLibDataStructures::processFunction(Function *F,
++                                        const StdLibInfo::LibAction &action) {
++  //
++  // Process all call sites.
++  //
++  for (Value::use_iterator ii = F->use_begin(); ii != F->use_end(); ++ii) {
++    if (isa<CallInst>(*ii) || isa<InvokeInst>(*ii)) {
++      CallSite CS(*ii);
++      if (CS.getCalledValue() == F) {
++        processCallSite(CS, action);
+       }
+-    } else if (InvokeInst* CI = dyn_cast<InvokeInst>(*ii)){
+-      if (CI->getCalledValue() == F) {
+-        DSGraph* Graph = getDSGraph(*CI->getParent()->getParent());
++    } else if (ConstantExpr *CE = dyn_cast<ConstantExpr>(*ii)) {
++      if (CE->isCast()) {
++        for (Value::use_iterator ci = CE->use_begin(); ci != CE->use_end(); ++ci) {
++          if (isa<CallInst>(*ci) || isa<InvokeInst>(*ci)) {
++            CallSite CS(*ci);
++            if(CS.getCalledValue() == CE)
++              processCallSite(CS, action);
++           }
++         }
++       }
+ 
+-        //
+-        // Set the read, write, and heap markers on the return value
+-        // as appropriate.
+-        //
+-        if(isa<PointerType>((CI)->getType())){
+-          if(Graph->hasNodeForValue(CI)){
+-            if (recFuncs[x].action.read[0])
+-              Graph->getNodeForValue(CI).getNode()->setReadMarker();
+-            if (recFuncs[x].action.write[0])
+-              Graph->getNodeForValue(CI).getNode()->setModifiedMarker();
+-            if (recFuncs[x].action.heap[0])
+-              Graph->getNodeForValue(CI).getNode()->setHeapMarker();
+-          }
+-        }
++    }
++  }
++  //
++  // Pretend that calls to this function do not exist anymore.
++  //
++  eraseCallsTo(F);
++}
+ 
+-        //
+-        // Set the read, write, and heap markers on the actual arguments
+-        // as appropriate.
+-        //
+-        for (unsigned y = 0; y < CI->getNumArgOperands(); ++y)
+-          if (isa<PointerType>(CI->getArgOperand(y)->getType())){
+-            if (Graph->hasNodeForValue(CI->getArgOperand(y))){
+-              if (recFuncs[x].action.read[y + 1])
+-                Graph->getNodeForValue(CI->getArgOperand(y)).getNode()->setReadMarker();
+-              if (recFuncs[x].action.write[y + 1])
+-                Graph->getNodeForValue(CI->getArgOperand(y)).getNode()->setModifiedMarker();
+-              if (recFuncs[x].action.heap[y + 1])
+-                Graph->getNodeForValue(CI->getArgOperand(y)).getNode()->setHeapMarker();
+-            }
+-          }
+ 
+-        //
+-        // Merge the DSNoes for return values and parameters as
+-        // appropriate.
+-        //
+-        std::vector<DSNodeHandle> toMerge;
+-        if (recFuncs[x].action.mergeNodes[0])
+-          if (isa<PointerType>(CI->getType()))
+-            if (Graph->hasNodeForValue(CI))
+-              toMerge.push_back(Graph->getNodeForValue(CI));
+-        for (unsigned y = 0; y < CI->getNumArgOperands(); ++y)
+-          if (recFuncs[x].action.mergeNodes[y + 1])
+-            if (isa<PointerType>(CI->getArgOperand(y)->getType()))
+-              if (Graph->hasNodeForValue(CI->getArgOperand(y)))
+-                toMerge.push_back(Graph->getNodeForValue(CI->getArgOperand(y)));
+-        for (unsigned y = 1; y < toMerge.size(); ++y)
+-          toMerge[0].mergeWith(toMerge[y]);
++void StdLibDataStructures::processCallSite(CallSite CS,
++                                           const StdLibInfo::LibAction &action) {
++  Instruction* CI = CS.getInstruction();
++  DSGraph* Graph = getDSGraph(*CS.getCaller());
+ 
+-        //
+-        // Collapse (fold) the DSNode of the return value and the actual
+-        // arguments if directed to do so.
+-        //
+-        if (!noStdLibFold && recFuncs[x].action.collapse) {
+-          if (isa<PointerType>(CI->getType())){
+-            if (Graph->hasNodeForValue(CI))
+-              Graph->getNodeForValue(CI).getNode()->foldNodeCompletely();
+-            NumNodesFoldedInStdLib++;
+-          }
+-          for (unsigned y = 0; y < CI->getNumArgOperands(); ++y){
+-            if (isa<PointerType>(CI->getArgOperand(y)->getType())){
+-              if (Graph->hasNodeForValue(CI->getArgOperand(y))){
+-                Graph->getNodeForValue(CI->getArgOperand(y)).getNode()->foldNodeCompletely();
+-                NumNodesFoldedInStdLib++;
+-              }
+-            }
+-          }
+-        }
+-      }
+-    } else if(ConstantExpr *CE = dyn_cast<ConstantExpr>(*ii)) {
+-      if(CE->isCast()) 
+-        for (Value::use_iterator ci = CE->use_begin(), ce = CE->use_end();
+-             ci != ce; ++ci) {
++  CallSite::arg_iterator arg;
++  unsigned y;
+ 
+-          if (CallInst* CI = dyn_cast<CallInst>(*ci)){
+-            if (CI->getCalledValue() == CE) {
+-              DSGraph* Graph = getDSGraph(*CI->getParent()->getParent());
++  //
++  // Set the read, write, and heap markers on the return value
++  // as appropriate.
++  //
++  if (isa<PointerType>(CI->getType()) && Graph->hasNodeForValue(CI)) {
++    if (action.read[0])
++      Graph->getNodeForValue(CI).getNode()->setReadMarker();
++    if (action.write[0])
++      Graph->getNodeForValue(CI).getNode()->setModifiedMarker();
++    if (action.heap[0])
++      Graph->getNodeForValue(CI).getNode()->setHeapMarker();
++  }
++  //
++  // Set the read, write, and heap markers on the actual arguments
++  // as appropriate.
++  //
++  for (y = 1, arg = CS.arg_begin(); arg != CS.arg_end(); ++arg, ++y) {
++    if (isa<PointerType>((*arg)->getType()) && Graph->hasNodeForValue(*arg)) {
++      if (action.read[y])
++        Graph->getNodeForValue(*arg).getNode()->setReadMarker();
++      if (action.write[y])
++        Graph->getNodeForValue(*arg).getNode()->setModifiedMarker();
++      if (action.heap[y])
++        Graph->getNodeForValue(*arg).getNode()->setHeapMarker();
++    }
++  }
++  //
++  // Merge the DSNoes for return values and parameters as
++  // appropriate.
++  //
++  std::vector<DSNodeHandle> toMerge;
++  if (action.mergeNodes[0]) {
++    if (isa<PointerType>(CI->getType()) && Graph->hasNodeForValue(CI))
++      toMerge.push_back(Graph->getNodeForValue(CI));
++  }
+ 
+-              //
+-              // Set the read, write, and heap markers on the return value
+-              // as appropriate.
+-              //
+-              if(isa<PointerType>((CI)->getType())){
+-                if(Graph->hasNodeForValue(CI)){
+-                  if (recFuncs[x].action.read[0])
+-                    Graph->getNodeForValue(CI).getNode()->setReadMarker();
+-                  if (recFuncs[x].action.write[0])
+-                    Graph->getNodeForValue(CI).getNode()->setModifiedMarker();
+-                  if (recFuncs[x].action.heap[0])
+-                    Graph->getNodeForValue(CI).getNode()->setHeapMarker();
+-                }
+-              }
++  for (y = 1, arg = CS.arg_begin(); arg != CS.arg_end(); ++arg, ++y) {
++    if (action.mergeNodes[y]) {
++      if (isa<PointerType>((*arg)->getType()) && Graph->hasNodeForValue(*arg))
++        toMerge.push_back(Graph->getNodeForValue(*arg));
++     }
++  }
+ 
+-              //
+-              // Set the read, write, and heap markers on the actual arguments
+-              // as appropriate.
+-              //
+-              for (unsigned y = 0; y < CI->getNumArgOperands(); ++y)
+-                if (recFuncs[x].action.read[y + 1]){
+-                  if (isa<PointerType>(CI->getArgOperand(y)->getType())){
+-                    if (Graph->hasNodeForValue(CI->getArgOperand(y)))
+-                      Graph->getNodeForValue(CI->getArgOperand(y)).getNode()->setReadMarker();
+-                    if (Graph->hasNodeForValue(CI->getArgOperand(y)))
+-                      Graph->getNodeForValue(CI->getArgOperand(y)).getNode()->setModifiedMarker();
+-                    if (Graph->hasNodeForValue(CI->getArgOperand(y)))
+-                      Graph->getNodeForValue(CI->getArgOperand(y)).getNode()->setHeapMarker();
+-                  }
+-                }
+-
+-              //
+-              // Merge the DSNoes for return values and parameters as
+-              // appropriate.
+-              //
+-              std::vector<DSNodeHandle> toMerge;
+-              if (recFuncs[x].action.mergeNodes[0])
+-                if (isa<PointerType>(CI->getType()))
+-                  if (Graph->hasNodeForValue(CI))
+-                    toMerge.push_back(Graph->getNodeForValue(CI));
+-              for (unsigned y = 0; y < CI->getNumArgOperands(); ++y)
+-                if (recFuncs[x].action.mergeNodes[y + 1])
+-                  if (isa<PointerType>(CI->getArgOperand(y)->getType()))
+-                    if (Graph->hasNodeForValue(CI->getArgOperand(y)))
+-                      toMerge.push_back(Graph->getNodeForValue(CI->getArgOperand(y)));
+-              for (unsigned y = 1; y < toMerge.size(); ++y)
+-                toMerge[0].mergeWith(toMerge[y]);
+-
+-              //
+-              // Collapse (fold) the DSNode of the return value and the actual
+-              // arguments if directed to do so.
+-              //
+-              if (!noStdLibFold && recFuncs[x].action.collapse) {
+-                if (isa<PointerType>(CI->getType())){
+-                  if (Graph->hasNodeForValue(CI))
+-                    Graph->getNodeForValue(CI).getNode()->foldNodeCompletely();
+-                  NumNodesFoldedInStdLib++;
+-                }
+-                for (unsigned y = 0; y < CI->getNumArgOperands(); ++y)
+-                  if (isa<PointerType>(CI->getArgOperand(y)->getType())){
+-                    if (Graph->hasNodeForValue(CI->getArgOperand(y))){
+-                      DSNode * Node=Graph->getNodeForValue(CI->getArgOperand(y)).getNode();
+-                      Node->foldNodeCompletely();
+-                      NumNodesFoldedInStdLib++;
+-                    }
+-                  }
+-              }
+-            }
+-          }
+-        }
++  for (unsigned y = 1; y < toMerge.size(); ++y)
++    toMerge[0].mergeWith(toMerge[y]);
++  if (!noStdLibFold && action.collapse) {
++    if (isa<PointerType>(CI->getType()) && Graph->hasNodeForValue(CI)) {
++      Graph->getNodeForValue(CI).getNode()->foldNodeCompletely();
++      NumNodesFoldedInStdLib++;
+     }
+-
++    for (y = 1, arg = CS.arg_begin(); arg != CS.arg_end(); ++arg, ++y) {
++      if (isa<PointerType>((*arg)->getType()) && Graph->hasNodeForValue(*arg)) {
++        Graph->getNodeForValue(*arg).getNode()->foldNodeCompletely();
++        NumNodesFoldedInStdLib++;
++      }
++    }
++  }
+   //
+-  // Pretend that this call site does not call this function anymore.
++  // Process special thread creation functions
++  // These turn into a function call to a "thread run" function
++  // TODO: I don't think this is exactly what we want (the RunFn should probably
++  //  be a root in the callgraph), but it seems to get the job done
+   //
+-  eraseCallsTo(F);
++  if (action.threadFnArg >= 0) {
++    assert(action.threadFnParamArg >= 0);
++
++    DEBUG(errs() << "Thread creation site: " << *CS.getInstruction() << "\n");
++    DEBUG(errs() << "Thread function Argument is " << action.threadFnArg << "\n");
++    DEBUG(errs() << "Thread paramenter Argument is " << action.threadFnParamArg << "\n");
++    
++#if 0 
++	DSNodeHandle RunFnNode = Graph->getNodeForValue(CS.getArgument(action.threadFnArg));
++    DSNodeHandle RunArgNode = Graph->getNodeForValue(CS.getArgument(action.threadFnParamArg));
++
++    std::vector<DSNodeHandle> args;
++    args.push_back(RunArgNode);
++    Graph->getFunctionCalls().push_back(
++        DSCallSite(CS, NULL /* no retval */, NULL /* no varargs */,
++                   RunFnNode.getNode(), args));
++#endif
++  }
+ }
+Index: lib/DSA/Printer.cpp
+===================================================================
+--- lib/DSA/Printer.cpp	(revision 175414)
++++ lib/DSA/Printer.cpp	(working copy)
+@@ -411,5 +411,5 @@
+   if (handleTest(O, M)) return;
+ 
+   printCollection(*this, O, M, printname);
+-  //dumpCallGraph();
++  dumpCallGraph();
+ }
+Index: lib/DSA/DSCallGraph.cpp
+===================================================================
+--- lib/DSA/DSCallGraph.cpp	(revision 175414)
++++ lib/DSA/DSCallGraph.cpp	(working copy)
+@@ -254,6 +254,48 @@
+   }
+ }
+ 
++//
++// Method: erase()
++//
++// Description:
++//  Removes the entry from the call graph that says that the specified call site
++//  calls the specified function.
++//
++// Inputs:
++//  CS - The call site which calls the specified function.
++//  F  - The function which is called.  A value of NULL is ignored.
++//
++void
++DSCallGraph::erase(llvm::CallSite CS, const llvm::Function* F) {
++  if (!F)
++    return;
++
++  //
++  // Find the function to which the call site belongs.
++  //
++  const llvm::Function * Parent = CS.getInstruction()->getParent()->getParent();
++
++  //
++  // Determine the SCC leaders for both the calling function and the called
++  // function.  If they don't belong to an SCC, add them as leaders.
++  //
++  SCCs.insert (Parent);
++  SCCs.insert (F);
++  const llvm::Function * ParentLeader = SCCs.getLeaderValue (Parent);
++  const llvm::Function * FLeader      = SCCs.getLeaderValue (F);
++
++  //
++  // Remove the call
++  //
++  ActualCalleesTy::iterator ai = ActualCallees.find(CS);
++  if (ai != ActualCallees.end())
++    ai->second.erase(FLeader);
++
++  SimpleCalleesTy::iterator si = SimpleCallees.find(ParentLeader);
++  if (si != SimpleCallees.end())
++    si->second.erase(FLeader);
++}
++
+ void DSCallGraph::insureEntry(const llvm::Function* F) {
+   SimpleCallees[F];
+ }
+Index: lib/DSA/DataStructure.cpp
+===================================================================
+--- lib/DSA/DataStructure.cpp	(revision 175414)
++++ lib/DSA/DataStructure.cpp	(working copy)
+@@ -273,12 +273,13 @@
+ }
+ 
+ void DSNode::addValueList(std::vector<const Value*> &List) const {
++  if(!getParentGraph())
++    return;
+   DSScalarMap &SN = getParentGraph()->getScalarMap();
+   for(DSScalarMap::const_iterator I = SN.begin(), E = SN.end(); I!= E; I++) {
+-    if(SN[I->first].getNode() == this){
+-      //I->first->dump();
+-    }
+-
++	if (I->second.getNode() == this) {
++		List.push_back(I->first);
++	}
+   }
+ }
+ /// addFullGlobalsSet - Compute the full set of global values that are
+@@ -353,7 +354,7 @@
+     for (svset<Type*>::const_iterator ni = TyMap[offset]->begin(),
+          ne = TyMap[offset]->end(); ni != ne; ++ni) {
+       if((*ni)->isPointerTy()) {
+-        PointerType * PT = dyn_cast<PointerType>(*ni);
++        const PointerType * PT = dyn_cast<PointerType>(*ni);
+         pointerTy = true;
+         ptrSize = TD.getPointerSize(PT->getAddressSpace());
+       }
+Index: lib/DSA/Local.cpp
+===================================================================
+--- lib/DSA/Local.cpp	(revision 175414)
++++ lib/DSA/Local.cpp	(working copy)
+@@ -793,7 +793,7 @@
+         Offset = 0;
+         break;
+       }
+-    } else if (const PointerType *PtrTy = dyn_cast<PointerType>(*I)) {
++    } else if (PointerType *PtrTy = dyn_cast<PointerType>(*I)) {
+       Type *CurTy = PtrTy->getElementType();
+ 
+       //
+@@ -1311,7 +1311,7 @@
+   // be adding to it.
+   //
+   Type * ElementType = GV->getType()->getElementType();
+-  while(ArrayType *ATy = dyn_cast<ArrayType>(ElementType)) {
++  while(const ArrayType *ATy = dyn_cast<ArrayType>(ElementType)) {
+     ElementType = ATy->getElementType();
+   }
+   if(!NH.getNode()->isNodeCompletelyFolded()) {
+Index: lib/DSA/DataStructureAA.cpp
+===================================================================
+--- lib/DSA/DataStructureAA.cpp	(revision 0)
++++ lib/DSA/DataStructureAA.cpp	(revision 0)
+@@ -0,0 +1,710 @@
++//===- DataStructureAA.cpp - Data Structure Based Alias Analysis ----------===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file was developed by the LLVM research group and is distributed under
++// the University of Illinois Open Source License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This pass uses the top-down data structure graphs to implement a simple
++// context sensitive alias analysis.
++//
++//===----------------------------------------------------------------------===//
++
++#define DEBUG_TYPE "dsaa"
++
++#include "dsa/DataStructureAA.h"
++#include "llvm/Assembly/Writer.h"
++#include "llvm/Support/CommandLine.h"
++#include "llvm/ADT/Statistic.h"
++
++using namespace llvm;
++
++namespace {
++// Register the pass
++RegisterPass<DSAA> X("ds-aa", "Data Structure Graph Based Alias Analysis");
++
++// Register as an implementation of AliasAnalysis
++RegisterAnalysisGroup<AliasAnalysis> Y(X);
++
++// Command line opts
++cl::opt<bool> ThreadSafeDSAA("ds-aa-thread-safe",
++         cl::desc("Enable thread-safe analysis for DSAA."),
++         cl::Hidden,
++         cl::init(true));
++}
++
++char DSAA::ID;
++
++ModulePass *llvm::createDSAAPass() { return new DSAA(); }
++
++DSAA::DSAA()
++  : ModulePass(ID), TD(NULL), BU(NULL), Steens(NULL), valid(false)
++{}
++
++DSAA::~DSAA() {
++  releaseMemory();
++}
++
++void DSAA::releaseMemory() {
++  valid = false;
++  StdLib = NULL;
++  TD = NULL;
++  BU = NULL;
++  Steens = NULL;
++  invalidateCache();
++}
++
++void DSAA::invalidateCache() {
++  MapCS = CallSite();
++  CallerCalleeMap.clear();
++}
++
++void DSAA::getAnalysisUsage(AnalysisUsage &AU) const {
++  AliasAnalysis::getAnalysisUsage(AU);
++  // Does not transform code
++  AU.setPreservesAll();
++  AU.addRequiredTransitive<SteensgaardDataStructures>();  // for alias
++  AU.addRequiredTransitive<EQTDDataStructures>();         // for alias, getModRefInfo
++  AU.addRequiredTransitive<EquivBUDataStructures>();      // for getModRefInfo
++  AU.addRequiredTransitive<StdLibDataStructures>();       // for getModRefInfo
++}
++
++bool DSAA::runOnModule(Module &M) {
++  InitializeAliasAnalysis(this);
++
++  assert(!valid && "DSAA executed twice without being invalidated?");
++
++  StdLib = &getAnalysis<StdLibDataStructures>();
++  TD = &getAnalysis<EQTDDataStructures>();
++  BU = &getAnalysis<EquivBUDataStructures>();
++  Steens = &getAnalysis<SteensgaardDataStructures>();
++
++  if (ThreadSafeDSAA) {
++    enumerateMemoryBarriers();
++    enumerateEscapingNodes(M);
++  }
++
++  // DEBUG
++  DEBUG(
++    dumpMemoryBarriers(errs());
++    dumpEscapingNodes(errs(), M);
++    errs() << "======== TD Graph =========\n";
++    TD->print(errs(), &M);
++    errs() << "======== Steens Graph =========\n";
++    Steens->print(errs(), &M)
++  );
++
++  valid = true;
++  return false;
++}
++
++// Compute memory barrier functions.
++// Recursive traversal of the call graph, starting at all possible roots.
++void DSAA::enumerateMemoryBarriers() {
++  const DSCallGraph &CG = TD->getCallGraph();
++  DenseSet<const Function*> visited;
++  DenseSet<const Function*> visiting;
++
++  for (DSCallGraph::root_iterator r = CG.root_begin(); r != CG.root_end(); ++r) {
++    visited.clear();
++    if (enumerateMemoryBarriers(CG, *r, &visited))
++      MemoryBarriers.insert(*r);
++  }
++}
++
++bool DSAA::enumerateMemoryBarriers(const DSCallGraph &CG,
++                                   const Function *LeaderF,
++                                   DenseSet<const Function*> *visited) {
++  // Prevent loops
++  if (visited->count(LeaderF))
++    return MemoryBarriers.count(LeaderF) > 0;
++
++  // This can happen for indirect calls
++  // In this case, query StdLibInfo and otherwise be conservative
++  if (LeaderF->isDeclaration()) {
++    const StdLibInfo::LibAction* action =
++          StdLib->getStdLibInfo().getLibActionForFunction(LeaderF);
++    return !action || action->memoryBarrier;
++  }
++
++  // Mark visited now.  Note that this can trigger the above visited->count()
++  // check for recursive calls.  In that case, we'll return `false`, which is
++  // okay because we're still in the process of computing the real answer.
++  visited->insert(LeaderF);
++
++  bool isBarrier = false;
++
++  // Process all call instructions for all functions in this SCC
++  for (DSCallGraph::scc_iterator F = CG.scc_begin(LeaderF),
++                                FE = CG.scc_end(LeaderF); F != FE; ++F) {
++    for (Function::const_iterator BB = F->begin(); BB != F->end(); ++BB) {
++      for (BasicBlock::const_iterator I = BB->begin(); I != BB->end(); ++I) {
++        if (!isa<CallInst>(I) && !isa<InvokeInst>(I))
++          continue;
++        CallSite CS(const_cast<Instruction*>(cast<Instruction>(I)));
++        // Direct call to a memory barrier?
++        const Function* Callee = CS.getCalledFunction();
++        const StdLibInfo::LibAction* action =
++          StdLib->getStdLibInfo().getLibActionForFunction(Callee);
++        if (action) {
++          if (action->memoryBarrier)
++            isBarrier = true;
++          // need to process callsites for threadcreate functions
++          if (action->threadFnArg < 0)
++            continue;
++        }
++        // Direct call to an unknown external function?
++        else if (Callee && Callee->isDeclaration()) {
++          isBarrier = true;
++          continue;
++        }
++        // Incomplete call site?
++        if (!CG.callee_is_complete(CS)) {
++          isBarrier = true;
++          /* no continue here */
++        }
++        // Process all potential call targets
++        for (DSCallGraph::callee_iterator T = CG.callee_begin(CS),
++                                         TE = CG.callee_end(CS); T != TE; ++T) {
++          if (enumerateMemoryBarriers(CG, *T, visited))
++            isBarrier = true;
++        }
++      }
++    }
++  }
++
++  // If this SCC calls a barrier, add all functions in the SCC to the barrier set
++  if (!isBarrier)
++    return false;
++
++  for (DSCallGraph::scc_iterator F = CG.scc_begin(LeaderF),
++                                FE = CG.scc_end(LeaderF); F != FE; ++F) {
++    MemoryBarriers.insert(*F);
++  }
++
++  return true;
++}
++
++void DSAA::dumpMemoryBarriers(raw_ostream &os) {
++  os << "MemoryBarriers: [ ";
++  for (std::set<const Function*>::iterator
++       it = MemoryBarriers.begin(); it != MemoryBarriers.end(); ++it)
++    os << (*it)->getName() << " ";
++  os << "]\n";
++}
++
++// Compute thread-escaping nodes.
++void DSAA::enumerateEscapingNodes(Module &M) {
++  EscapingNodes.clear();
++  DSGraph *G = Steens->getResultGraph();
++	errs() << __func__ << "()\n";
++  //
++  // -- 1 --
++  // All nodes reachable from globals are escaping
++  //
++
++  for (DSGraph::node_const_iterator N = G->node_begin(); N != G->node_end(); ++N) {
++    if (N->isGlobalNode() || N->isUnknownNode())
++      N->markReachableNodes(EscapingNodes);
++  }
++
++  //
++  // -- 2 --
++  // All nodes reachable from a thread creation function are escaping
++  //
++
++  for (Module::const_iterator F = M.begin(); F != M.end(); ++F) {
++    for (Function::const_iterator BB = F->begin(); BB != F->end(); ++BB) {
++      for (BasicBlock::const_iterator I = BB->begin(); I != BB->end(); ++I) {
++        if (!isa<CallInst>(I) && !isa<InvokeInst>(I))
++          continue;
++        CallSite CS(const_cast<Instruction*>(cast<Instruction>(I)));
++        // Direct call to a thread creation function?
++        const Function* Callee = CS.getCalledFunction();
++        const StdLibInfo::LibAction* action =
++          StdLib->getStdLibInfo().getLibActionForFunction(Callee);
++        if (!action || action->threadFnParamArg < 0)
++          continue;
++        const Value *P = CS.getArgument(action->threadFnParamArg);
++        DSGraph::ScalarMapTy::const_iterator N = G->getScalarMap().find(P);
++        if (N == G->getScalarMap().end())
++          continue;
++        N->second.getNode()->markReachableNodes(EscapingNodes);
++      }
++    }
++  }
++
++  //
++  // -- 3 --
++  // All nodes reachable from the arguments or return values of external
++  // functions are escaping.  Note that this is already computed by the
++  // `External` flag of a node, so we do not need to do anything here.
++  //
++}
++
++void DSAA::dumpEscapingNodes(raw_ostream &os, Module &M) {
++  DSGraph *G = Steens->getResultGraph();
++  EquivalenceClasses<const GlobalValue*>& GlobalECs = G->getGlobalECs();
++
++  os << "EscapingNodes: [\n";
++  for (DenseSet<const DSNode*>::iterator
++       N = EscapingNodes.begin(); N != EscapingNodes.end(); ++N) {
++    for (DSNode::globals_iterator I = (*N)->globals_begin(); I != (*N)->globals_end(); ++I) {
++      os << "  ";
++      WriteAsOperand(os, *I, false, &M);
++      EquivalenceClasses<const GlobalValue*>::iterator E = GlobalECs.findValue(*I);
++      if (E != GlobalECs.end()) {
++        unsigned members = std::distance(GlobalECs.member_begin(E), GlobalECs.member_end());
++        if (members != 1) os << " + " << (members-1) << " EC";
++      }
++    }
++    os << "\n";
++  }
++  os << "]\n";
++}
++
++STATISTIC(ext,  "esc: (1) external node");
++STATISTIC(eic,  "esc: (2) inc node");
++STATISTIC(een,  "esc: (3) escaping node");
++STATISTIC(oeen, "esc: (4) only escaping node");
++
++#include <stdio.h>
++bool DSAA::mightValueEscapeThread(const Value *V) {
++  DSGraph *G = Steens->getResultGraph();
++
++  const DSGraph::ScalarMapTy &GSM = G->getScalarMap();
++  DSGraph::ScalarMapTy::const_iterator I = GSM.find(V);
++  if (I == GSM.end())
++    return false;
++  // Is the node escaping?
++  // Need to check if this node is external (see comment in enumerateEscapingNodes)
++  DSNode *N = I->second.getNode();
++  if ( N->isExternalNode() || N->isIncompleteNode() || EscapingNodes.count(N) > 0) {
++  	if ( N->isExternalNode() )   ext++;
++  	if ( N->isIncompleteNode() ) eic++;
++  	if ( EscapingNodes.count(N) > 0 ) een++;
++  	if ( EscapingNodes.count(N) > 0 && !(N->isIncompleteNode()||N->isExternalNode())) oeen++;
++	
++    return true;
++
++	}
++  return false;
++}
++
++// Return the DSGraph for the function the Value appears in, or NULL
++// if the value was not defined in a function.
++static const Function*
++getFunctionForValue(const Value *V) {
++  if (const Instruction *I = dyn_cast<Instruction>(V))
++    return I->getParent()->getParent();
++  else if (const Argument *A = dyn_cast<Argument>(V))
++    return A->getParent();
++  else if (const BasicBlock *BB = dyn_cast<BasicBlock>(V))
++    return BB->getParent();
++  return NULL;
++}
++
++DSGraph*
++DSAA::getFunctionGraphForValue(const Value *V) {
++  const Function *F = getFunctionForValue(V);
++  if (F) return TD->getDSGraph(*F);
++  return NULL;
++}
++
++// Do the locations alias?
++AliasAnalysis::AliasResult
++DSAA::alias(const Location &Loc1, const Location &Loc2) {
++  assert(valid && "DSAA invalidated but then queried?!");
++
++  const Value *V1 = Loc1.Ptr;
++  const Value *V2 = Loc2.Ptr;
++  uint64_t V1Size = Loc1.Size;
++  uint64_t V2Size = Loc2.Size;
++
++  if (V1 == V2)
++    return MustAlias;
++
++  if (!V1 || !V2)
++    return AliasAnalysis::alias(Loc1, Loc2);
++
++  DEBUG(errs() << "Alias for: " << *V1 << " " << *V2 << "\n");
++
++  // Decide on a common graph to use
++  DSGraph *G1 = getFunctionGraphForValue(V1);
++  DSGraph *G2 = getFunctionGraphForValue(V2);
++  DSGraph *G = NULL;
++
++  // If G1=null then V1 is a GlobalValue
++  // In this case use G2 if it exists, otherwise fall back on the globals graph
++  if (!G1 || !G2) {
++    G = G1 ? G1 : (G2 ? G2 : TD->getGlobalsGraph());
++  }
++
++  // If the graphs differ then values come from different functions, so fall
++  // back on the global Steensgaard graph
++  else if (G1 != G2) {
++    G = Steens->getResultGraph();
++  }
++
++  // Otherwise the graphs are the same and non-null
++  else {
++    G = G1;
++  }
++
++  const DSGraph::ScalarMapTy &GSM = G->getScalarMap();
++  DSGraph::ScalarMapTy::const_iterator I = GSM.find(V1);
++  if (I == GSM.end()) return NoAlias;
++
++  DSGraph::ScalarMapTy::const_iterator J = GSM.find(V2);
++  if (J == GSM.end()) return NoAlias;
++
++  DSNode  *N1 = I->second.getNode(),  *N2 = J->second.getNode();
++  unsigned O1 = I->second.getOffset(), O2 = J->second.getOffset();
++
++  // Can't tell whether anything aliases null
++  if (N1 == NULL || N2 == NULL)
++    goto unknown;
++
++  // We can make a further judgment only if one of the nodes is complete
++  if ((N1->isCompleteNode() && !N1->isExternalNode()) ||
++      (N2->isCompleteNode() && !N2->isExternalNode())) {
++    // Different nodes don't alias
++    if (N1 != N2)
++      return NoAlias;
++
++    // Non-overlapping fields don't alias
++    if (O1 != O2) {
++      if (O2 < O1) {    // Ensure that O1 <= O2
++        std::swap(V1, V2);
++        std::swap(O1, O2);
++        std::swap(V1Size, V2Size);
++      }
++
++      if (O1+V1Size <= O2)
++        return NoAlias;
++    }
++  }
++
++unknown:
++  // Other alias analyses cannot handle values from different functions.
++  // Preempt assertion failures in that case (see, e.g., BasicAliasAnalysis).
++  // Note that we can't do the separate-function comparison with G1 and G2,
++  // because these may be the same for different functions in the same SCC.
++  const Function *F1 = getFunctionForValue(V1);
++  const Function *F2 = getFunctionForValue(V2);
++  if (F1 && F2 && F1 != F2)
++    return MayAlias;
++
++  // Defer to chain
++  return AliasAnalysis::alias(Loc1, Loc2);
++}
++
++// Does a callsite modify or reference a value?
++AliasAnalysis::ModRefResult
++DSAA::getModRefInfo(ImmutableCallSite CS, const Location &Loc) {
++  assert(valid && "DSAA invalidated but then queried?!");
++
++  if (!Loc.Ptr)
++    return AliasAnalysis::getModRefInfo(CS, Loc);
++
++  std::pair<bool, ModRefResult> res;
++
++  //
++  // Try to resolve the call target directly
++  //
++  const Function *F = CS.getCalledFunction();
++  if (F) {
++    DEBUG(errs() << "GetModRefInfo directcall: "
++                 << F->getName() << " " << *Loc.Ptr << "\n");
++
++    res = getModRefInfoForCallee(CS, Loc, F);
++
++    DEBUG(errs() << "                            <"
++                 << res.first << " , " << res.second << ">\n");
++
++    if (res.first)
++      return res.second;
++    else
++      return mergeChainedModRefInfo(CS, Loc, res.second);
++  }
++
++  //
++  // Otherwise, query DSA for all possible call targets
++  //
++  DSGraph *G = getFunctionGraphForValue(Loc.Ptr);
++  if (!G)
++    G = TD->getGlobalsGraph();
++
++  const DSGraph::ScalarMapTy &GSM = G->getScalarMap();
++  DSGraph::ScalarMapTy::const_iterator nodeIt = GSM.find(CS.getCalledValue());
++  if (nodeIt == GSM.end())
++    return mergeChainedModRefInfo(CS, Loc, ModRef);
++
++  std::vector<const Function*> targets;
++  nodeIt->second.getNode()->addFullFunctionList(targets);
++  if (targets.empty())
++    return mergeChainedModRefInfo(CS, Loc, ModRef);
++
++  // Combine the ModRefInfo for all possible targets
++  bool precise = true;
++  unsigned preciseinfo = NoModRef;  // we cannot be more precise than this
++  unsigned mayinfo     = NoModRef;  // conservative may-info (we will OR-in as we go)
++
++  for (size_t i = 0; i < targets.size(); ++i) {
++    F = targets[i];
++
++    DEBUG(errs() << "GetModRefInfo indirectcall: "
++                 << F->getName() << " " << *Loc.Ptr << "\n");
++
++    res = getModRefInfoForCallee(CS, Loc, F);
++
++    DEBUG(errs() << "                            <"
++                 << res.first << " , " << res.second << ">\n");
++
++    if (res.first) {
++      preciseinfo |= res.second;
++      if (preciseinfo == ModRef)
++        return ModRef;
++    }
++    mayinfo |= res.second;
++    if (!res.first)
++      precise = false;
++  }
++
++  if (precise) {
++    assert(preciseinfo == mayinfo);
++    return (ModRefResult)preciseinfo;
++  }
++
++  // Maybe a chained analysis can be more precise
++  return mergeChainedModRefInfo(CS, Loc, (ModRefResult)mayinfo);
++}
++
++//
++// At this point, the absence of bits in `mayinfo` represents proven info.
++// For example, if mayinfo=Ref, then we have proven that none of the targets
++// can modify Loc.  However, we were not completely precise, so we should
++// check if a chained AliasAnalysis::getModRefInfo can remove more bits
++// from mayinfo.
++//
++AliasAnalysis::ModRefResult
++DSAA::mergeChainedModRefInfo(ImmutableCallSite CS, const Location &Loc,
++                             ModRefResult mayinfo) {
++  if (mayinfo == NoModRef)
++    return NoModRef;
++
++  // Other alias analyses cannot handle values from different functions
++  // Preempt assertion failures in that case (see, e.g., BasicAliasAnalysis)
++  const Function *F = getFunctionForValue(Loc.Ptr);
++  if (F && F != CS.getCaller())
++    return (ModRefResult)mayinfo;
++
++  mayinfo = ModRefResult(mayinfo & AliasAnalysis::getModRefInfo(CS, Loc));
++  return mayinfo;
++}
++
++//
++// Does a callsite modify or reference a value?  In this version, we are
++// given a specific known (possible) callee, and we return a pair:
++//
++//   first: true iff we have precise ModRef info
++//          false if we should query a chained analysis for more info
++//
++//   second: the ModRefResult
++//
++std::pair<bool, AliasAnalysis::ModRefResult>
++DSAA::getModRefInfoForCallee(ImmutableCallSite CS, const Location &Loc,
++                             const Function *F) {
++  assert(valid && "DSAA invalidated but then queried?!");
++  assert(F);
++
++  const Value *P = Loc.Ptr;
++  const uint64_t Size = Loc.Size;
++
++  // Cannot optimize across memory barriers, unless the value doesn't escape
++  // TODO: we can probably optimize this further for Acquire vs Release fences
++  if (ThreadSafeDSAA) {
++    if (MemoryBarriers.count(F) > 0 && mightValueEscapeThread(P))
++      return std::make_pair(true, ModRef);
++  }
++
++  DSNode *N = NULL;
++  // First step, check our cache.
++  if (CS.getInstruction() == MapCS.getInstruction()) {
++    DEBUG(errs() << "  ... cached\n");
++    {
++      const Function *Caller = CS.getCaller();
++      DSGraph* CallerTDGraph = TD->getDSGraph(*Caller);
++
++      // Figure out which node in the TD graph this pointer corresponds to.
++      DSScalarMap &CallerSM = CallerTDGraph->getScalarMap();
++      DSScalarMap::iterator NI = CallerSM.find(P);
++      if (NI == CallerSM.end()) {
++        invalidateCache();
++        return DSAA::getModRefInfoForCallee(CS, Loc, F);
++      }
++      N = NI->second.getNode();
++    }
++
++  HaveMappingInfo:
++    assert(N && "Null pointer in scalar map??");
++
++    typedef std::multimap<DSNode*, const DSNode*>::iterator NodeMapIt;
++    std::pair<NodeMapIt, NodeMapIt> Range = CallerCalleeMap.equal_range(N);
++
++    // Loop over all of the nodes in the callee that correspond to "N", keeping
++    // track of aggregate mod/ref info.
++    bool NeverReads = true, NeverWrites = true;
++    for (; Range.first != Range.second; ++Range.first) {
++      if (Range.first->second->isModifiedNode())
++        NeverWrites = false;
++      if (Range.first->second->isReadNode())
++        NeverReads = false;
++      if (NeverReads == false && NeverWrites == false)
++        return std::make_pair(false, ModRef);
++    }
++
++    ModRefResult Result = ModRef;
++    if (NeverWrites)      // We proved it was not modified.
++      Result = ModRefResult(Result & ~Mod);
++    if (NeverReads)       // We proved it was not read.
++      Result = ModRefResult(Result & ~Ref);
++
++    if (Result == NoModRef)
++      return std::make_pair(true, NoModRef);
++
++    // Maybe a further AliasAnalysis can be more precise
++    return std::make_pair(false, Result);
++  }
++
++  // Any cached info we have is for the wrong function.
++  invalidateCache();
++
++  if (F->isDeclaration()) {
++    const bool escapes  = ThreadSafeDSAA ? mightValueEscapeThread(P) : false;
++
++    //
++    // First check if this is a known external function
++    //
++    const StdLibInfo::LibAction *action =
++      StdLib->getStdLibInfo().getLibActionForFunction(F);
++
++    if (action) {
++      // Cannot optimize across memory barriers.  Note that `MemoryBarriers`
++      // only includes functions with definitions, hence this check is not
++      // redundant with the one above.
++      if (ThreadSafeDSAA && action->memoryBarrier && escapes)
++        return std::make_pair(true, ModRef);
++
++      unsigned res = NoModRef;
++
++      // For each arg (including the return value), check if the ptr
++      // aliases that arg.  If it does, merge the mod/ref info for that
++      // arg into the result.
++      for (unsigned y = 0; y < CS.arg_size()+1; ++y) {
++        if (!action->read[y] && !action->write[y])
++          continue;
++        const Value *a = (y == 0) ? CS.getInstruction() : CS.getArgument(y-1);
++        if (isa<PointerType>(a->getType()) && alias(Loc, Location(a,Size)) != NoAlias) {
++          if (action->read[y])
++            res = Ref;
++          if (action->write[y])
++            res |= Mod;
++          if (res == ModRef)
++            break;
++        }
++      }
++
++      return std::make_pair(true, (ModRefResult)res);
++    }
++
++    //
++    // This external function is not known.
++    // Thread safe:
++    //   Worst case, it may call a sync function, i.e., a memory barrier
++    // Not thread safe:
++    //   If P doesn't escape to an external function, it cannot be modified.
++    //
++    if (ThreadSafeDSAA && escapes)
++      return std::make_pair(true, ModRef);
++
++    const Function *Caller = CS.getInstruction()->getParent()->getParent();
++    DSGraph *G = TD->getDSGraph(*Caller);
++    DSScalarMap::iterator NI = G->getScalarMap().find(P);
++    if (NI == G->getScalarMap().end()) {
++      // If it wasn't in the local function graph, check the global graph.  This
++      // can occur for globals who are locally reference but hoisted out to the
++      // globals graph despite that.
++      G = G->getGlobalsGraph();
++      NI = G->getScalarMap().find(P);
++      if (NI == G->getScalarMap().end())
++        return std::make_pair(false, ModRef);
++    }
++
++    DSNode *N = NI->second.getNode();
++    if (N->isCompleteNode() && !N->isExternalNode())
++      return std::make_pair(true, NoModRef);
++    else
++      return std::make_pair(false, ModRef);
++  }
++
++  // Get the graphs for the callee and caller.  Note that we want the BU graph
++  // for the callee because we don't want all caller's effects incorporated!
++  const Function *Caller = CS.getInstruction()->getParent()->getParent();
++  DSGraph* CallerTDGraph = TD->getDSGraph(*Caller);
++  DSGraph* CalleeBUGraph = BU->getDSGraph(*F);
++
++  // Figure out which node in the TD graph this pointer corresponds to.
++  DSScalarMap &CallerSM = CallerTDGraph->getScalarMap();
++  DSScalarMap::iterator NI = CallerSM.find(P);
++  if (NI == CallerSM.end()) {
++    ModRefResult Result = ModRef;
++    if (isa<ConstantPointerNull>(P) || isa<UndefValue>(P))
++      return std::make_pair(true, NoModRef);  // null is never modified :)
++    else {
++      assert(isa<GlobalVariable>(P) &&
++    cast<GlobalVariable>(P)->getType()->getElementType()->isFirstClassType() &&
++             "This isn't a global that DSA inconsiderately dropped "
++             "from the graph?");
++
++      DSGraph* GG = CallerTDGraph->getGlobalsGraph();
++      DSScalarMap::iterator NI = GG->getScalarMap().find(P);
++      if (NI != GG->getScalarMap().end() && !NI->second.isNull()) {
++        // Otherwise, if the node is only M or R, return this.  This can be
++        // useful for globals that should be marked const but are not.
++        DSNode *N = NI->second.getNode();
++        if (!N->isModifiedNode())
++          Result = (ModRefResult)(Result & ~Mod);
++        if (!N->isReadNode())
++          Result = (ModRefResult)(Result & ~Ref);
++      }
++    }
++
++    if (Result == NoModRef)
++      return std::make_pair(true, Result);
++
++    // Maybe a further AliasAnalysis can be more precise
++    return std::make_pair(false, Result);
++  }
++
++  // Compute the mapping from nodes in the callee graph to the nodes in the
++  // caller graph for this call site.
++  CallSite mCS = CallSite(const_cast<Instruction*>(CS.getInstruction()));
++  DSGraph::NodeMapTy CalleeCallerMap;
++  DSCallSite DSCS = CallerTDGraph->getDSCallSiteForCallSite(mCS);
++  CallerTDGraph->computeCalleeCallerMapping(DSCS, *F, *CalleeBUGraph,
++                                            CalleeCallerMap);
++
++  // Remember the mapping and the call site for future queries.
++  MapCS = mCS;
++
++  // Invert the mapping into CalleeCallerInvMap.
++  for (DSGraph::NodeMapTy::iterator I = CalleeCallerMap.begin(),
++         E = CalleeCallerMap.end(); I != E; ++I)
++    CallerCalleeMap.insert(std::make_pair(I->second.getNode(), I->first));
++
++  N = NI->second.getNode();
++  goto HaveMappingInfo;
++}
+Index: lib/DSA/StdLibInfo.cpp
+===================================================================
+--- lib/DSA/StdLibInfo.cpp	(revision 0)
++++ lib/DSA/StdLibInfo.cpp	(revision 0)
+@@ -0,0 +1,515 @@
++//                     The LLVM Compiler Infrastructure
++//
++// This file was developed by the LLVM research group and is distributed under
++// the University of Illinois Open Source License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// Recognize common standard c library functions and generate graphs for them
++//
++//===----------------------------------------------------------------------===//
++
++#include "dsa/StdLibInfo.h"
++#include "llvm/Module.h"
++#include "llvm/Function.h"
++
++using namespace llvm;
++
++namespace {
++
++//
++// libActions for known functions
++//
++
++#define NRET_NARGS    {0,0,0,0,0,0,0,0,0,0}
++#define YRET_NARGS    {1,0,0,0,0,0,0,0,0,0}
++#define NRET_YARGS    {0,1,1,1,1,1,1,1,1,1}
++#define YRET_YARGS    {1,1,1,1,1,1,1,1,1,1}
++#define NRET_NYARGS   {0,0,1,1,1,1,1,1,1,1}
++#define YRET_NYARGS   {1,0,1,1,1,1,1,1,1,1}
++#define NRET_YNARGS   {0,1,0,0,0,0,0,0,0,0}
++#define YRET_YNARGS   {1,1,0,0,0,0,0,0,0,0}
++#define YRET_NNYARGS  {1,0,0,1,1,1,1,1,1,1}
++#define NRET_NNYARGS  {0,0,0,1,1,1,1,1,1,1}
++#define YRET_NNYNARGS {1,0,0,1,0,0,0,0,0,0}
++#define NRET_NNNYARGS {0,0,0,0,1,1,1,1,1,1}
++#define NRET_YYNARGS  {0,1,1,0,0,0,0,0,0,0}
++
++#define NOFLAGS           false, false, -1, -1
++#define COLLAPSE          true, false, -1, -1
++#define MEMBARRIER        false, true, -1, -1
++#define THREADCREATE(a,b) false, false, a, b
++
++const struct {
++  const char* name;
++  StdLibInfo::LibAction action;
++} recFuncs[] = {
++  {"stat",       {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fstat",      {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"lstat",      {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  {"getenv",     {NRET_YNARGS, YRET_NARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"getrusage",  {NRET_YNARGS, YRET_NYARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"getrlimit",  {NRET_YNARGS, YRET_NYARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"setrlimit",  {NRET_YARGS,  YRET_NARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"getcwd",     {NRET_NYARGS, YRET_YNARGS, NRET_NARGS, YRET_YNARGS, NOFLAGS}},
++  
++  {"select",    {NRET_YARGS, YRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"_setjmp",   {NRET_YARGS, YRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"longjmp",   {NRET_YARGS, NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  {"remove",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"rename",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"unlink",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fileno",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"create",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"write",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"read",      {NRET_YARGS, YRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"truncate",  {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"open",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++ 
++  {"chdir",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"mkdir",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"rmdir",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  {"chmod",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fchmod",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++ 
++  {"kill",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pipe",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  {"execl",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"execlp",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"execle",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"execv",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"execvp",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++ 
++  {"time",      {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"times",     {NRET_YARGS,  YRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"ctime",     {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"asctime",   {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"utime",     {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"localtime", {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"gmtime",    {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"ftime",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++
++  // printf not strictly true, %n could cause a write
++  {"printf",    {NRET_YARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fprintf",   {NRET_YARGS,  NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fprintf",   {NRET_YARGS,  NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sprintf",   {NRET_YARGS,  NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"snprintf",  {NRET_YARGS,  NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"vsnprintf", {NRET_YARGS,  YRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sscanf",    {NRET_YARGS,  YRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"scanf",     {NRET_YARGS,  YRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fscanf",    {NRET_YARGS,  YRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"calloc",    {NRET_NARGS, YRET_NARGS, YRET_NARGS,  NRET_NARGS, NOFLAGS}},
++  {"malloc",    {NRET_NARGS, YRET_NARGS, YRET_NARGS,  NRET_NARGS, NOFLAGS}},
++  {"valloc",    {NRET_NARGS, YRET_NARGS, YRET_NARGS,  NRET_NARGS, NOFLAGS}},
++  {"realloc",   {NRET_NARGS, YRET_NARGS, YRET_YNARGS, YRET_YNARGS,NOFLAGS}},
++  {"free",      {NRET_NARGS, NRET_NARGS, NRET_YNARGS, NRET_NARGS, NOFLAGS}},
++ 
++  {"strdup",    {NRET_YARGS, YRET_NARGS, YRET_NARGS, YRET_YARGS, NOFLAGS}},
++  {"__strdup",  {NRET_YARGS, YRET_NARGS, YRET_NARGS, YRET_YARGS, NOFLAGS}},
++  {"wcsdup",    {NRET_YARGS, YRET_NARGS, YRET_NARGS, YRET_YARGS, NOFLAGS}},
++ 
++  {"strlen",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"wcslen",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++ 
++  {"atoi",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"atof",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"atol",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"atoll",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"atoq",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++ 
++  {"memcmp",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"strcmp",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"wcscmp",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"strncmp",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"wcsncmp",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"strcasecmp",  {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"wcscasecmp",  {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"strncasecmp", {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"wcsncasecmp", {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  {"strcat",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"strncat",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  
++  {"strcpy",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"stpcpy",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"wcscpy",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"strncpy",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"wcsncpy",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"memcpy",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"memccpy",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"wmemccpy",   {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"memmove",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}}, 
++  
++  {"bcopy",      {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_YARGS, COLLAPSE}},
++  {"bcmp",       {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, COLLAPSE}},
++  
++  {"strerror",   {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  COLLAPSE}},
++  {"clearerr",   {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"strstr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"wcsstr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"strspn",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  COLLAPSE}},
++  {"wcsspn",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  COLLAPSE}},
++  {"strcspn",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  COLLAPSE}},
++  {"wcscspn",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  COLLAPSE}},
++  {"strtok",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"strpbrk",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"wcspbrk",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++
++  {"strchr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"wcschr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"strrchr",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"wcsrchr",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"strchrnul",  {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"wcschrnul",  {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++
++  {"memchr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"wmemchr",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"memrchr",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++
++  {"memalign",   {NRET_NARGS, YRET_NARGS, YRET_NARGS,  NRET_NARGS, NOFLAGS}},
++  {"posix_memalign",  {NRET_YARGS, YRET_YNARGS, NRET_NARGS,  NRET_NARGS, NOFLAGS}},
++
++  {"perror",     {NRET_YARGS,  NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  {"feof",       {NRET_YARGS,  NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fflush",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fpurge",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fclose",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fopen",      {NRET_YARGS,  YRET_NARGS, YRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"ftell",      {NRET_YARGS,  NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fseek",      {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, COLLAPSE}},
++  {"rewind",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, COLLAPSE}},
++  {"ferror",     {NRET_YARGS,  NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fwrite",     {NRET_YARGS,  NRET_NYARGS,NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fread",      {NRET_NYARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fdopen",     {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"__errno_location", {NRET_NARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"puts",       {NRET_YARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"gets",       {NRET_NARGS,  YRET_YARGS,  NRET_NARGS, YRET_YNARGS, NOFLAGS}},
++  {"fgets",      {NRET_NYARGS, YRET_YNARGS, NRET_NARGS, YRET_YNARGS, NOFLAGS}},
++  {"getc",       {NRET_YNARGS, YRET_YNARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"ungetc",     {NRET_YNARGS, YRET_YARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"_IO_getc",   {NRET_YNARGS, YRET_YNARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"fgetc",      {NRET_YNARGS, YRET_YNARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"putc",       {NRET_NARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"_IO_putc",   {NRET_NARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"putchar",    {NRET_NARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"fputs",      {NRET_YARGS,  NRET_NYARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"fputc",      {NRET_YARGS,  NRET_NYARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++
++  // POSIX Threads
++  {"pthread_attr_destroy",         {NRET_YARGS, NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_init",            {NRET_YARGS, NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_attr_getdetachstate",  {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getguardsize",    {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getinheritsched", {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getschedparam",   {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getschedpolicy",  {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getscope",        {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getstackaddr",    {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getstacksize",    {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_attr_setdetachstate",  {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setguardsize",    {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setinheritsched", {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setschedparam",   {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setschedpolicy",  {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setscope",        {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setstackaddr",    {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setstacksize",    {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_barrier_destroy",   {NRET_YARGS, NRET_YARGS,   NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_barrier_init",      {NRET_YARGS, NRET_YNARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_barrier_wait",      {NRET_YARGS, NRET_YARGS,   NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++
++  {"pthread_barrierattr_destroy",    {NRET_YARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_barrierattr_getpshared", {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_barrierattr_init",       {NRET_NARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_barrierattr_setpshared", {NRET_YNARGS, NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_cancel", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // TODO: pthread_cleanup_push
++  // TODO: pthread_cleanup_pop
++
++  {"pthread_cond_broadcast", {NRET_YARGS, NRET_YARGS,   NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_cond_destroy",   {NRET_YARGS, NRET_YARGS,   NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_cond_init",      {NRET_YARGS, NRET_YNARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_cond_signal",    {NRET_YARGS, NRET_YARGS,   NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_cond_timedwait", {NRET_YARGS, NRET_YYNARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_cond_wait",      {NRET_YARGS, NRET_YARGS,   NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++
++  {"pthread_condattr_destroy",    {NRET_YARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_condattr_getpshared", {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_condattr_init",       {NRET_NARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_condattr_setpshared", {NRET_YNARGS, NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_create",  {NRET_YYNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, THREADCREATE(2,3)}},
++
++  {"pthread_detach", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_equal",  {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_exit",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_getconcurrency", {NRET_NARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_getschedparam",  {NRET_NYARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_getspecific",    {NRET_NARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_join",       {NRET_NARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_key_create", {NRET_NARGS, NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_key_delete", {NRET_NARGS, NRET_NARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_mutex_destroy", {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutex_init",    {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutex_lock",    {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_mutex_trylock", {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_mutex_unlock",  {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++
++  {"pthread_mutex_getprioceiling", {NRET_YNARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutex_setprioceiling", {NRET_YARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_mutexattr_destroy",        {NRET_YARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_getprioceiling", {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_getprotocol",    {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_getpshared",     {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_gettype",        {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_init",           {NRET_NARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_setprioceiling", {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_setprotocol",    {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_setpshared",     {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_settype",        {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_once", {NRET_YARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++
++  {"pthread_rwlock_destroy",   {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_rwlock_init",      {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_rwlock_rdlock",    {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_rwlock_tryrdlock", {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_rwlock_trywrlock", {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_rwlock_unlock",    {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_rwlock_wrlock",    {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++
++  {"pthread_rwlockattr_destroy",    {NRET_YARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_rwlockattr_getpshared", {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_rwlockattr_init",       {NRET_NARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_rwlockattr_setpshared", {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_self",           {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_setcancelstate", {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_setcanceltype",  {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_setconcurrency", {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_setschedparam",  {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_setspecific",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_testcancel",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  // SAFECode Intrinsics
++  {"sc.lscheck", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.lscheckui", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.lscheckalign", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.lscheckalignui", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_register_stack", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_unregister_stack", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_register_global", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_unregister_global", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_register", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_unregister", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_argvregister", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  // CIF Intrinsics
++  {"__if_pool_get_label", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"__if_pool_set_label", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // CStdLib Runtime Wrapper Functions
++  {"pool_strncpy",    {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  COLLAPSE}},
++  {"pool_strcpy",     {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  COLLAPSE}},
++  {"pool_stpcpy",     {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  COLLAPSE}},
++  // strchr and index have same functionality
++  {"pool_strchr",     {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   COLLAPSE}},
++  {"pool_index",      {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   COLLAPSE}},
++  // strrchr and rindex have same functionality
++  {"pool_strrchr",    {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   COLLAPSE}},
++  {"pool_rindex",     {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   COLLAPSE}},
++  {"pool_strcat",     {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  COLLAPSE}},
++  {"pool_strncat",    {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  COLLAPSE}},
++  {"pool_strstr",     {NRET_NNYARGS, YRET_NARGS,    NRET_NARGS, YRET_NNYNARGS, COLLAPSE}},
++  {"pool_strcasestr", {NRET_NNYARGS, YRET_NARGS,    NRET_NARGS, YRET_NNYNARGS, COLLAPSE}},
++  {"pool_strpbrk",    {NRET_NNYARGS, YRET_NARGS,    NRET_NARGS, YRET_NNYNARGS, COLLAPSE}},
++  {"pool_strspn",     {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, NRET_NARGS,    COLLAPSE}},
++  {"pool_strcspn",    {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, NRET_NARGS,    COLLAPSE}},
++  {"pool_memccpy",    {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  COLLAPSE}},
++  {"pool_memchr",     {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   COLLAPSE}},
++  {"pool_strcmp",     {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_strncmp",    {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_strlen",     {NRET_NYARGS,  NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_strnlen",    {NRET_NYARGS,  NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_memcmp",     {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_strcasecmp", {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_strncasecmp",{NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_bcopy",      {NRET_NNYARGS, NRET_NNNYARGS, NRET_NARGS, NRET_NNYARGS,  COLLAPSE}},
++  {"pool_bcmp",       {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,    COLLAPSE}},
++
++  // format string intrinsics and functions
++  {"sc.fsparameter",  {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.fscallinfo",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.fscallinfo_debug",{NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_printf",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_fprintf",    {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_sprintf",    {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_snprintf",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_err",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_errx",       {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_warn",       {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_warnx",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_syslog",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_scanf",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_fscanf",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_sscanf",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool___printf_chk",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool___fprintf_chk",  {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool___sprintf_chk",  {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool___snprintf_chk", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  // Type Checks
++  {"trackArgvType",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackEnvpType",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackGlobal",          {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackArray",           {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackStoreInst",       {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackStringInput",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"compareTypeAndNumber", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"compareVAArgType",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"getTypeTag",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"checkType",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackInitInst",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackUnInitInst",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"copyTypeInfo",         {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"setTypeInfo",         {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"setVAInfo", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"copyVAInfo", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackctype",           {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackctype_32",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackStrcpyInst",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackStrcnpyInst",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackStrcatInst",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgetcwd",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgetpwuid",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgethostname",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgethostbyname",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgetservbyname",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgetaddrinfo",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgetsockname",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackaccept",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackpoll",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackpipe",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackReadLink",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++
++#if 0
++  {"wait",       {false, false, false, false,  true, false, false, false, NOFLAGS}},
++#endif
++
++  // C++ functions, as mangled on linux gcc 4.2
++  // operator new(unsigned long)
++  {"_Znwm",      {NRET_NARGS, YRET_NARGS, YRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // operator new[](unsigned long)
++  {"_Znam",      {NRET_NARGS, YRET_NARGS, YRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // operator new(unsigned int)
++  {"_Znwj",      {NRET_NARGS, YRET_NARGS, YRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // operator new[](unsigned int)
++  {"_Znaj",      {NRET_NARGS, YRET_NARGS, YRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // operator delete(void*)
++  {"_ZdlPv",     {NRET_NARGS, NRET_NARGS, NRET_YNARGS,NRET_NARGS, NOFLAGS}},
++  // operator delete[](void*)
++  {"_ZdaPv",     {NRET_NARGS, NRET_NARGS, NRET_YNARGS, NRET_NARGS, NOFLAGS}},
++  // flush
++  {"_ZNSo5flushEv", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // << operator
++  {"_ZNSolsEd", {NRET_YARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // << operator
++  {"_ZNSolsEPFRSoS_E", {NRET_YARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  //endl
++  {"_ZSt4endlIcSt11char_traitsIcEERSt13basic_ostreamIT_T0_ES6_", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // Terminate the list of special functions recognized by this pass
++  {0,            {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++};
++
++const struct {
++  Intrinsic::ID id;
++  StdLibInfo::LibAction action;
++} recIntrinsics[] = {
++  /* TODO: why do we have to take care of memory barrier? */
++#if 0
++  {Intrinsic::memory_barrier, {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++#else
++  {Intrinsic::not_intrinsic, {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++#endif
++};
++
++/*
++   Functions to add
++   freopen
++   strftime
++   strtoul
++   strtol
++   strtoll
++   ctype family
++   setbuf
++   setvbuf
++   __strpbrk_c3
++   open64/fopen64/lseek64
++ */
++
++}
++
++void StdLibInfo::initialize(Module &M) {
++  if (&M == module)
++    return;
++
++  module = &M;
++  functionMap.clear();
++  intrinsicMap.clear();
++
++  for (int x = 0; recFuncs[x].name; ++x) {
++    if (Function* F = M.getFunction(recFuncs[x].name))
++      if (F->isDeclaration())
++        functionMap[F] = &recFuncs[x].action;
++  }
++
++  for (int x = 0; recIntrinsics[x].id; ++x) {
++    intrinsicMap[recIntrinsics[x].id] = &recIntrinsics[x].action;
++  }
++}
++
++const StdLibInfo::LibAction*
++StdLibInfo::getLibActionForFunction(const Function *F) const {
++  assert(module && "Forgot to call StdLibInfo::initializeForModule?");
++
++  if (!F)
++    return NULL;
++
++  Intrinsic::ID id = (Intrinsic::ID)F->getIntrinsicID();
++  IntrinsicMapTy::const_iterator ii = intrinsicMap.find(id);
++  if (ii != intrinsicMap.end())
++    return ii->second;
++
++  FunctionMapTy::const_iterator fi = functionMap.find(F);
++  if (fi != functionMap.end())
++    return fi->second;
++
++  return NULL;
++}
++
++const StdLibInfo::LibAction*
++StdLibInfo::getLibActionForFunctionName(StringRef name) const {
++  // Linear search since this isn't used on a critical path
++  for (int x = 0; recFuncs[x].name; ++x) {
++    if (recFuncs[x].name == name)
++      return &recFuncs[x].action;
++  }
++  return NULL;
++}
+Index: lib/DSA/Steensgaard.cpp
+===================================================================
+--- lib/DSA/Steensgaard.cpp	(revision 0)
++++ lib/DSA/Steensgaard.cpp	(revision 0)
+@@ -0,0 +1,164 @@
++//===- Steensgaard.cpp - Context Insensitive Data Structure Analysis ------===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file was developed by the LLVM research group and is distributed under
++// the University of Illinois Open Source License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This pass computes a context-insensitive data analysis graph.  It does this
++// by computing the local analysis graphs for all of the functions, then merging
++// them together into a single big graph without cloning.
++//
++//===----------------------------------------------------------------------===//
++
++#include "dsa/DataStructure.h"
++#include "dsa/DSGraph.h"
++#include "llvm/Analysis/AliasAnalysis.h"
++#include "llvm/Analysis/Passes.h"
++#include "llvm/Module.h"
++#include "llvm/Support/Debug.h"
++#include "llvm/Support/FormattedStream.h"
++#include <iostream>
++#include <ostream>
++
++using namespace llvm;
++
++static RegisterPass<SteensgaardDataStructures>
++X("dsa-steens", "Context-insensitive Data Structure Analysis");
++
++char SteensgaardDataStructures::ID;
++
++SteensgaardDataStructures::~SteensgaardDataStructures() {
++  releaseMemory();
++}
++
++void
++SteensgaardDataStructures::releaseMemory() {
++  delete ResultGraph; 
++  ResultGraph = 0;
++  DataStructures::releaseMemory();
++}
++
++void
++SteensgaardDataStructures::print(llvm::raw_ostream &O, const Module *M) const {
++  assert(ResultGraph && "Result graph has not yet been computed!");
++  ResultGraph->writeGraphToFile(O, "steensgaards");
++}
++
++
++/// run - Build up the result graph, representing the pointer graph for the
++/// program.
++///
++bool
++SteensgaardDataStructures::runOnModule(Module &M) {
++  DS = &getAnalysis<EQTDDataStructures>();
++  init(DS, true, true, true, false);
++  return runOnModuleInternal(M);
++}
++
++bool
++SteensgaardDataStructures::runOnModuleInternal(Module &M) {
++  assert(ResultGraph == NULL && "Result graph already allocated!");
++  
++  // Create a new, empty, graph.
++  // The GlobalsGraph was created for us by init()
++  ResultGraph = new DSGraph(GlobalECs, getDataLayout(), *TypeSS, GlobalsGraph);
++
++  // Merge graphs for non-external functions into this graph.
++  for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I) {
++    if (!I->isDeclaration())
++      ResultGraph->cloneInto(DS->getDSGraph(*I));  // ugh, should be "cloneFrom"
++  }
++
++  ResultGraph->removeTriviallyDeadNodes();
++
++  // Now that all graphs are inlined, eliminate call nodes.
++  // Start with a copy of the original call sites.
++  std::list<DSCallSite> &Calls = ResultGraph->getFunctionCalls();
++
++  for (std::list<DSCallSite>::iterator CI = Calls.begin(); CI != Calls.end();) {
++    DSCallSite &CurCall = *CI++;
++
++    // Get possible call targets at this call site.
++    std::vector<const Function*> CallTargets;
++    if (CurCall.isDirectCall())
++      CallTargets.push_back(CurCall.getCalleeFunc());
++    else
++      CurCall.getCalleeNode()->addFullFunctionList(CallTargets);
++
++    // Loop over the possible targets, eliminating as many as possible.
++    // To eliminate, we merge the retval and args at the callsite with
++    // those at the definition (thus we can't eliminate external calls).
++    for (unsigned c = 0; c != CallTargets.size(); ) {
++      const Function *F = CallTargets[c];
++      if (!F->isDeclaration()) {
++        ResolveFunctionCall(F, CurCall, ResultGraph->getReturnNodes()[F]);
++        CallTargets[c] = CallTargets.back();
++        CallTargets.pop_back();
++      } else
++        ++c;  // Cannot eliminate this call, skip over it...
++    }
++
++    if (CallTargets.empty()) {        // Eliminated all calls?
++      std::list<DSCallSite>::iterator I = CI;
++      Calls.erase(--I);               // Remove entry
++    }
++  }
++
++  // Remove our knowledge of what the return values of the functions are, except
++  // for functions that are externally visible from this module (e.g. main).  We
++  // keep these functions so that their arguments are marked incomplete.
++  for (DSGraph::ReturnNodesTy::iterator
++         I = ResultGraph->getReturnNodes().begin(),
++         E = ResultGraph->getReturnNodes().end(); I != E; ) {
++    if (I->first->hasInternalLinkage())
++      ResultGraph->getReturnNodes().erase(I++);
++    else
++      ++I;
++  }
++
++  // Clone the global nodes into this graph.
++  cloneGlobalsInto(ResultGraph, DSGraph::DontCloneCallNodes |
++                                DSGraph::DontCloneAuxCallNodes);
++
++  // Remove any nodes that are dead after all of the merging we have done.
++  ResultGraph->removeDeadNodes(DSGraph::KeepUnreachableGlobals);
++
++  // EQTDDataStructures has labeled incomplete/external nodes.  Now
++  // we propagate external labels transitively in case of node merges.
++  // TODO: need to propagate incomplete labels in the same way?
++  ResultGraph->computeExternalFlags(DSGraph::DontMarkFormalsExternal |
++                                    DSGraph::IgnoreCallSites);
++  ResultGraph->computeIntPtrFlags();
++
++  DEBUG(print(errs(), &M));
++  return false;
++}
++
++/// ResolveFunctionCall - Resolve the actual arguments of a call to function F
++/// with the specified call site descriptor.  This function links the arguments
++/// and the return value for the call site context-insensitively.
++///
++void
++SteensgaardDataStructures::ResolveFunctionCall(const Function *F, 
++                                                const DSCallSite &Call,
++                                                DSNodeHandle &RetVal) {
++
++  assert(ResultGraph != 0 && "Result graph not allocated!");
++  DSGraph::ScalarMapTy &ValMap = ResultGraph->getScalarMap();
++
++  // Handle the return value of the function...
++  if (Call.getRetVal().getNode() && RetVal.getNode())
++    RetVal.mergeWith(Call.getRetVal());
++
++  // Loop over all pointer arguments, resolving them to their provided pointers
++  unsigned PtrArgIdx = 0;
++  for (Function::const_arg_iterator AI = F->arg_begin(), AE = F->arg_end();
++       AI != AE && PtrArgIdx < Call.getNumPtrArgs(); ++AI) {
++    DSGraph::ScalarMapTy::iterator I = ValMap.find(AI);
++    if (I != ValMap.end())    // If its a pointer argument...
++      I->second.mergeWith(Call.getPtrArg(PtrArgIdx++));
++  }
++}
+Index: include/dsa/DSNode.h
+===================================================================
+--- include/dsa/DSNode.h	(revision 175414)
++++ include/dsa/DSNode.h	(working copy)
+@@ -210,7 +210,7 @@
+     Size = NSize;
+   }
+   
+-  void growSizeForType(Type *Ty, unsigned Offset);
++  void growSizeForType( Type *Ty, unsigned Offset);
+ 
+   /// hasLink - Return true if this memory object has a link in slot LinkNo
+   ///
+Index: include/dsa/DSCallGraph.h
+===================================================================
+--- include/dsa/DSCallGraph.h	(revision 175414)
++++ include/dsa/DSCallGraph.h	(working copy)
+@@ -46,7 +46,7 @@
+ 
+   // Functions we know about that aren't called
+   svset<const llvm::Function*> knownRoots;
+-  
++
+   // Functions that might be called from an incomplete
+   // unresolved call site.
+   svset<const llvm::Function*> IncompleteCalleeSet;
+@@ -75,6 +75,7 @@
+   typedef llvm::EquivalenceClasses<const llvm::Function*>::member_iterator scc_iterator;
+ 
+   void insert(llvm::CallSite CS, const llvm::Function* F);
++  void erase(llvm::CallSite CS, const llvm::Function* F);
+ 
+   void insureEntry(const llvm::Function* F);
+ 
+Index: include/dsa/DataStructure.h
+===================================================================
+--- include/dsa/DataStructure.h	(revision 175414)
++++ include/dsa/DataStructure.h	(working copy)
+@@ -19,6 +19,7 @@
+ #include "dsa/super_set.h"
+ #include "dsa/AddressTakenAnalysis.h"
+ #include "dsa/AllocatorIdentification.h"
++#include "dsa/StdLibInfo.h"
+ 
+ #include "llvm/Pass.h"
+ #include "llvm/DataLayout.h"
+@@ -64,6 +65,7 @@
+   void eliminateUsesOfECGlobals(DSGraph& G, const svset<const GlobalValue*> &ECGlobals);
+ 
+   // DSInfo, one graph for each function
++public:
+   DSInfoTy DSInfo;
+ 
+   // Name for printing
+@@ -144,7 +146,7 @@
+   const DSCallGraph& getCallGraph() const { return callgraph; }
+ 
+   SuperSet<Type*>& getTypeSS() const { return *TypeSS; }
+-  
++ 
+   /// deleteValue/copyValue - Interfaces to update the DSGraphs in the program.
+   /// These correspond to the interfaces defined in the AliasAnalysis class.
+   void deleteValue(Value *V);
+@@ -199,8 +201,10 @@
+ class StdLibDataStructures : public DataStructures {
+   void eraseCallsTo(Function* F);
+   void processRuntimeCheck (Module & M, std::string name, unsigned arg);
+-  void processFunction(int x, Function *F);
++  void processFunction(Function *F, const StdLibInfo::LibAction &action);
++  void processCallSite(CallSite CS, const StdLibInfo::LibAction &action);
+   AllocIdentify *AllocWrappersAnalysis;
++  StdLibInfo stdLibInfo;
+ public:
+   static char ID;
+   StdLibDataStructures() : DataStructures(ID, "stdlib.") {}
+@@ -215,6 +219,7 @@
+     AU.addRequired<AllocIdentify>();
+     AU.setPreservesAll();
+   }
++  StdLibInfo& getStdLibInfo() { return stdLibInfo; }
+ };
+ 
+ /// BUDataStructures - The analysis that computes the interprocedurally closed
+@@ -400,6 +405,53 @@
+   ~EQTDDataStructures();
+ };
+ 
++/// SteensgaardsDataStructures - Analysis that computes a context-insensitive
++/// data structure graphs for the whole program.  This is done by merging all
++/// function graphs generated by
++///
++class SteensgaardDataStructures : public DataStructures {
++  DSGraph *ResultGraph;
++  DataStructures *DS;
++  void ResolveFunctionCall(const Function *F, const DSCallSite &Call,
++                             DSNodeHandle &RetVal);
++  bool runOnModuleInternal(Module &M);
++
++public:
++  static char ID;
++  SteensgaardDataStructures()
++    : DataStructures(ID, "steensgaard."), ResultGraph(NULL)
++  {}
++  ~SteensgaardDataStructures();
++
++  virtual bool runOnModule(Module &M);
++  virtual void releaseMemory();
++
++  virtual void getAnalysisUsage(AnalysisUsage &AU) const {
++    AU.addRequired<DataLayout>();
++    AU.addRequired<EQTDDataStructures>();
++    AU.setPreservesAll();
++  }
++
++  void print(llvm::raw_ostream &O, const Module *M) const;
++
++  /// getDSGraph - Return the data structure graph for the specified function.
++  ///
++  virtual DSGraph *getDSGraph(const Function &F) const {
++    return getResultGraph();
++  }
++
++  virtual bool hasDSGraph(const Function &F) const {
++    return true;
++  }
++
++  /// getResultGraph - Return the data structure graph for the whole program.
++  ///
++  DSGraph *getResultGraph() const {
++    return ResultGraph;
++  }
++};
++
++
+ } // End llvm namespace
+ 
+ #endif
+Index: include/dsa/DataStructureAA.h
+===================================================================
+--- include/dsa/DataStructureAA.h	(revision 0)
++++ include/dsa/DataStructureAA.h	(revision 0)
+@@ -0,0 +1,140 @@
++//===- DataStructureAA.h - Data Structure Based Alias Analysis ------------===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file was developed by the LLVM research group and is distributed under
++// the University of Illinois Open Source License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This pass uses the top-down data structure graphs to implement a simple
++// context sensitive alias analysis.
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_ANALYSIS_DATASTRUCTUREAA_H
++#define LLVM_ANALYSIS_DATASTRUCTUREAA_H
++
++#include "llvm/Constants.h"
++#include "llvm/DerivedTypes.h"
++#include "llvm/Module.h"
++#include "llvm/Analysis/AliasAnalysis.h"
++#include "llvm/Analysis/Passes.h"
++#include "dsa/DataStructure.h"
++#include "dsa/DSGraph.h"
++
++namespace llvm {
++
++class DSAA : public ModulePass, public AliasAnalysis {
++private:
++  StdLibDataStructures *StdLib;
++  EQTDDataStructures *TD;
++  EquivBUDataStructures *BU;
++  SteensgaardDataStructures *Steens;
++
++  // The set of functions which may invoke a memory barrier, including via a
++  // transitive call
++  std::set<const Function*> MemoryBarriers;
++
++  // The set of nodes which may escape from a single thread to multiple threads
++  // These are nodes in the Steensgaard DSGraph
++  DenseSet<const DSNode*> EscapingNodes;
++
++  // These members are used to cache mod/ref information to make us return
++  // results faster, particularly for aa-eval.  On the first request of
++  // mod/ref information for a particular call site, we compute and store the
++  // calculated nodemap for the call site.  Any time DSA info is updated we
++  // free this information, and when we move onto a new call site, this
++  // information is also freed.
++  CallSite MapCS;
++  std::multimap<DSNode*, const DSNode*> CallerCalleeMap;
++  bool valid;
++
++private:
++  void invalidateCache();
++
++  void enumerateMemoryBarriers();
++  bool enumerateMemoryBarriers(const DSCallGraph &CG,
++                               const Function *F,
++                               DenseSet<const Function*> *visited);
++  void dumpMemoryBarriers(raw_ostream &os);
++
++  void enumerateEscapingNodes(Module &M);
++  void dumpEscapingNodes(raw_ostream &os, Module &M);
++
++  DSGraph *getFunctionGraphForValue(const Value *V);
++
++  std::pair<bool, ModRefResult>
++  getModRefInfoForCallee(ImmutableCallSite CS,
++                         const Location &Loc,
++                         const Function *Callee);
++
++  ModRefResult
++  mergeChainedModRefInfo(ImmutableCallSite CS,
++                         const Location &Loc,
++                         ModRefResult mayinfo);
++
++public:
++  static char ID;
++  DSAA();
++  virtual ~DSAA();
++
++  //------------------------------------------------
++  // Implement the Pass API
++  //
++
++  virtual bool runOnModule(Module &M);
++  virtual void releaseMemory();
++  virtual void getAnalysisUsage(AnalysisUsage &AU) const;
++
++  /// getAdjustedAnalysisPointer - This method is used when a pass implements
++  /// an analysis interface through multiple inheritance.  If needed, it
++  /// should override this to adjust the this pointer as needed for the
++  /// specified pass info.
++  virtual void *getAdjustedAnalysisPointer(const void *ID) {
++    if (ID == &AliasAnalysis::ID)
++      return (AliasAnalysis*)this;
++    return this;
++  }
++
++  //------------------------------------------------
++  // Implement an EscapeAnalysis API
++  //
++
++  bool mightValueEscapeThread(const Value *V);
++
++  //------------------------------------------------
++  // Implement the AliasAnalysis API
++  //
++
++  virtual AliasResult alias(const Location &Loc1, const Location &Loc2);
++
++  virtual ModRefResult getModRefInfo(ImmutableCallSite CS,
++                                     const Location &Loc);
++
++  virtual ModRefResult getModRefInfo(ImmutableCallSite CS1,
++                                     ImmutableCallSite CS2) {
++    return AliasAnalysis::getModRefInfo(CS1,CS2);
++  }
++
++  virtual void deleteValue(Value *V) {
++    assert(valid && "DSAA invalidated but then queried?!");
++    invalidateCache();
++    BU->deleteValue(V);
++    TD->deleteValue(V);
++    AliasAnalysis::deleteValue(V);
++  }
++
++  virtual void copyValue(Value *From, Value *To) {
++    assert(valid && "DSAA invalidated but then queried?!");
++    if (From == To) return;
++    invalidateCache();
++    BU->copyValue(From, To);
++    TD->copyValue(From, To);
++    AliasAnalysis::copyValue(From, To);
++  }
++};
++
++} // End llvm namespace
++
++#endif
+Index: include/dsa/StdLibInfo.h
+===================================================================
+--- include/dsa/StdLibInfo.h	(revision 0)
++++ include/dsa/StdLibInfo.h	(revision 0)
+@@ -0,0 +1,96 @@
++//===- DataStructure.h - Build data structure graphs ------------*- C++ -*-===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file was developed by the LLVM research group and is distributed under
++// the University of Illinois Open Source License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// Info about common standard c library functions
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_ANALYSIS_STDLIBINFO_H
++#define LLVM_ANALYSIS_STDLIBINFO_H
++
++#include "llvm/Intrinsics.h"
++#include "llvm/ADT/StringRef.h"
++#include <map>
++
++namespace llvm {
++class Module;
++class Function;
++
++class StdLibInfo {
++public:
++  enum { numOps = 10 };
++  //
++  // Structure: libAction
++  //
++  // Description:
++  //  Describe how the DSGraph of a function should be built.  Note that for the
++  //  boolean arrays of arity numOps, the first element is a flag describing the
++  //  return value, and the remaining elements are flags describing the
++  //  function's arguments.
++  //
++  struct LibAction {
++    // The return value/arguments that should be marked read.
++    bool read[numOps];
++
++    // The return value/arguments that should be marked modified.
++    bool write[numOps];
++
++    // The return value/arguments that should be marked as heap.
++    bool heap[numOps];
++
++    // Flags whether the return value should be merged with all arguments.
++    bool mergeNodes[numOps];
++
++    // Flags whether the return value and arguments should be folded.
++    bool collapse;
++
++    // Flags whether the function implies a memory barrier (accesses cannot
++    // be optimized across this barrier).  Used by DSAA::getModRefInfo, but
++    // not used to build DSGraphs as it does not affect the points-to relation.
++    bool memoryBarrier;
++
++    // Specify whether this function is a thread creation function.  If not,
++    // these are -1.  If so, these are the argument indices for the thread spawn
++    // function and the argument pass to the thread spawn function.  Argument
++    // indices start at 0.  For building DSGraphs, this adds a call to the spawn
++    // function with the given argument.
++    int threadFnArg;        // e.g., this is 2 for pthread_create
++    int threadFnParamArg;   // e.g., this is 3 for pthread_create
++  };
++
++private:
++  typedef std::map<const Function*, const LibAction*> FunctionMapTy;
++  typedef std::map<Intrinsic::ID, const LibAction*> IntrinsicMapTy;
++
++  Module *module;
++  FunctionMapTy functionMap;
++  IntrinsicMapTy intrinsicMap;
++
++public:
++  StdLibInfo() : module(NULL) {}
++  ~StdLibInfo() {}
++
++  // Call this before querying for getLibActionForFunction().
++  void initialize(Module &M);
++
++  // Returns the LibAction for the specified function, if it exists,
++  // and otherwise returns NULL.
++  const LibAction* getLibActionForFunction(const Function *F) const;
++
++  // Returns the LibAction for the specified function, if it exists,
++  // and otherwise returns NULL.  Note that this works even if this
++  // class hasn't been initialized.
++  const LibAction* getLibActionForFunctionName(StringRef name) const;
++};
++
++
++} // End llvm namespace
++
++#endif
++

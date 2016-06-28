@@ -1,0 +1,15 @@
+#!/usr/local/bin/gnuplot
+
+set terminal x11
+set title "OSIRIS Crash-Recovery" 
+set grid
+set style line 1 lt 5 lc rgb "white" lw 5
+set style line 2 lt 5 lc rgb "yellow" lw 5
+set yrange [0:2]
+set ytic 50
+set xlabel "timeline"
+unset xtics
+plot '< for i in {0..20}; do grep "RS ready:" $MROOT/ref.serial.dat; done | tail -20' using 3 with lines ls 1 title "Reference VM", \
+     '< grep "RS ready:" $MROOT/fault.serial.dat | tail -20' using 3 with lines ls 2 title "Fault induced VM"
+
+reread

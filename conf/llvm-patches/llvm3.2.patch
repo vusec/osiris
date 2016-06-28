@@ -1,0 +1,206 @@
+--- orig/tools/lto/LTOCodeGenerator.cpp
++++ new/tools/lto/LTOCodeGenerator.cpp
+@@ -47,6 +47,10 @@
+ using namespace llvm;
+ 
+ static cl::opt<bool>
++DisableOpt("disable-opt", cl::init(false),
++  cl::desc("Do not run the optimization pass"));
++
++static cl::opt<bool>
+ DisableInline("disable-inlining", cl::init(false),
+   cl::desc("Do not run the inliner pass"));
+ 
+@@ -377,9 +381,11 @@
+   // Enabling internalize here would use its AllButMain variant. It
+   // keeps only main if it exists and does nothing for libraries. Instead
+   // we create the pass ourselves with the symbol list provided by the linker.
+-  PassManagerBuilder().populateLTOPassManager(passes, /*Internalize=*/false,
+-                                              !DisableInline,
+-                                              DisableGVNLoadPRE);
++  if (!DisableOpt) {
++      PassManagerBuilder().populateLTOPassManager(passes, /*Internalize=*/false,
++                                                  !DisableInline,
++                                                  DisableGVNLoadPRE);
++  }
+ 
+   // Make sure everything is still good.
+   passes.add(createVerifierPass());
+
+--- orig/lib/Transforms/Utils/ValueMapper.cpp
++++ new/lib/Transforms/Utils/ValueMapper.cpp
+@@ -63,14 +63,29 @@
+     // Check all operands to see if any need to be remapped.
+     for (unsigned i = 0, e = MD->getNumOperands(); i != e; ++i) {
+       Value *OP = MD->getOperand(i);
+-      if (OP == 0 || MapValue(OP, VM, Flags, TypeMapper) == OP) continue;
++      if (OP == 0) continue;
++      Value *Mapped_OP = MapValue(OP, VM, Flags, TypeMapper);
++      // Use identity map if Mapped_Op is null and we can ignore missing
++      // entries.
++      if (Mapped_OP == OP ||
++          (Mapped_OP == 0 && (Flags & RF_IgnoreMissingEntries)))
++        continue;
+ 
+       // Ok, at least one operand needs remapping.  
+       SmallVector<Value*, 4> Elts;
+       Elts.reserve(MD->getNumOperands());
+       for (i = 0; i != e; ++i) {
+         Value *Op = MD->getOperand(i);
+-        Elts.push_back(Op ? MapValue(Op, VM, Flags, TypeMapper) : 0);
++        if (Op == 0)
++          Elts.push_back(0);
++        else {
++          Value *Mapped_Op = MapValue(Op, VM, Flags, TypeMapper);
++          // Use identity map if Mapped_Op is null and we can ignore missing
++          // entries.
++          if (Mapped_Op == 0 && (Flags & RF_IgnoreMissingEntries))
++            Mapped_Op = Op;
++          Elts.push_back(Mapped_Op);
++        }
+       }
+       MDNode *NewMD = MDNode::get(V->getContext(), Elts);
+       Dummy->replaceAllUsesWith(NewMD);
+
+--- orig/lib/CodeGen/AsmPrinter/DwarfDebug.cpp
++++ new/lib/CodeGen/AsmPrinter/DwarfDebug.cpp
+@@ -147,7 +147,7 @@
+   : Asm(A), MMI(Asm->MMI), FirstCU(0),
+     AbbreviationsSet(InitAbbreviationsSetSize),
+     SourceIdMap(DIEValueAllocator), StringPool(DIEValueAllocator),
+-    PrevLabel(NULL) {
++    PrevLabel(NULL), GlobalCUIndexCount(0) {
+   NextStringPoolNumber = 0;
+ 
+   DwarfInfoSectionSym = DwarfAbbrevSectionSym = 0;
+@@ -604,11 +604,13 @@
+   DICompileUnit DIUnit(N);
+   StringRef FN = DIUnit.getFilename();
+   CompilationDir = DIUnit.getDirectory();
+-  unsigned ID = GetOrCreateSourceID(FN, CompilationDir);
++  // Call this to emit a .file directive if it wasn't emitted for the source
++  // file this CU comes from yet.
++  GetOrCreateSourceID(FN, CompilationDir);
+ 
+   DIE *Die = new DIE(dwarf::DW_TAG_compile_unit);
+-  CompileUnit *NewCU = new CompileUnit(ID, DIUnit.getLanguage(), Die,
+-                                       Asm, this);
++  CompileUnit *NewCU = new CompileUnit(GlobalCUIndexCount++,
++                                       DIUnit.getLanguage(), Die, Asm, this);
+   NewCU->addString(Die, dwarf::DW_AT_producer, DIUnit.getProducer());
+   NewCU->addUInt(Die, dwarf::DW_AT_language, dwarf::DW_FORM_data2,
+                  DIUnit.getLanguage());
+@@ -1753,7 +1755,7 @@
+ 
+     // Emit the compile units header.
+     Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("info_begin",
+-                                                  TheCU->getID()));
++                                                  TheCU->getUniqueID()));
+ 
+     // Emit size of content not including length itself
+     unsigned ContentSize = Die->getSize() +
+@@ -1772,7 +1774,8 @@
+     Asm->EmitInt8(Asm->getDataLayout().getPointerSize());
+ 
+     emitDIE(Die);
+-    Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("info_end", TheCU->getID()));
++    Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("info_end",
++                                                  TheCU->getUniqueID()));
+   }
+ }
+ 
+@@ -1963,22 +1966,25 @@
+       Asm->getObjFileLowering().getDwarfPubTypesSection());
+     Asm->OutStreamer.AddComment("Length of Public Types Info");
+     Asm->EmitLabelDifference(
+-      Asm->GetTempSymbol("pubtypes_end", TheCU->getID()),
+-      Asm->GetTempSymbol("pubtypes_begin", TheCU->getID()), 4);
++      Asm->GetTempSymbol("pubtypes_end", TheCU->getUniqueID()),
++      Asm->GetTempSymbol("pubtypes_begin", TheCU->getUniqueID()), 4);
+ 
+     Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("pubtypes_begin",
+-                                                  TheCU->getID()));
++                                                  TheCU->getUniqueID()));
+ 
+     if (Asm->isVerbose()) Asm->OutStreamer.AddComment("DWARF Version");
+     Asm->EmitInt16(dwarf::DWARF_VERSION);
+ 
+     Asm->OutStreamer.AddComment("Offset of Compilation Unit Info");
+-    Asm->EmitSectionOffset(Asm->GetTempSymbol("info_begin", TheCU->getID()),
++    Asm->EmitSectionOffset(Asm->GetTempSymbol("info_begin",
++                                              TheCU->getUniqueID()),
+                            DwarfInfoSectionSym);
+ 
+     Asm->OutStreamer.AddComment("Compilation Unit Length");
+-    Asm->EmitLabelDifference(Asm->GetTempSymbol("info_end", TheCU->getID()),
+-                             Asm->GetTempSymbol("info_begin", TheCU->getID()),
++    Asm->EmitLabelDifference(Asm->GetTempSymbol("info_end",
++                                                TheCU->getUniqueID()),
++                             Asm->GetTempSymbol("info_begin",
++                                                TheCU->getUniqueID()),
+                              4);
+ 
+     const StringMap<DIE*> &Globals = TheCU->getGlobalTypes();
+@@ -1998,7 +2004,7 @@
+     Asm->OutStreamer.AddComment("End Mark");
+     Asm->EmitInt32(0);
+     Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("pubtypes_end",
+-                                                  TheCU->getID()));
++                                                  TheCU->getUniqueID()));
+   }
+ }
+ 
+--- orig/lib/CodeGen/AsmPrinter/DwarfCompileUnit.cpp
++++ new/lib/CodeGen/AsmPrinter/DwarfCompileUnit.cpp
+@@ -32,9 +32,9 @@
+ using namespace llvm;
+ 
+ /// CompileUnit - Compile unit constructor.
+-CompileUnit::CompileUnit(unsigned I, unsigned L, DIE *D, AsmPrinter *A,
++CompileUnit::CompileUnit(unsigned UID, unsigned L, DIE *D, AsmPrinter *A,
+                          DwarfDebug *DW)
+-  : ID(I), Language(L), CUDie(D), Asm(A), DD(DW), IndexTyDie(0) {
++  : UniqueID(UID), Language(L), CUDie(D), Asm(A), DD(DW), IndexTyDie(0) {
+   DIEIntegerOne = new (DIEValueAllocator) DIEInteger(1);
+ }
+ 
+--- orig/lib/CodeGen/AsmPrinter/DwarfDebug.h
++++ new/lib/CodeGen/AsmPrinter/DwarfDebug.h
+@@ -319,6 +319,9 @@
+   // A holder for the DarwinGDBCompat flag so that the compile unit can use it.
+   bool isDarwinGDBCompat;
+   bool hasDwarfAccelTables;
++
++  // Counter for assigning globally unique IDs for CUs.
++  unsigned GlobalCUIndexCount;
+ private:
+ 
+   /// assignAbbrevNumber - Define a unique number for the abbreviation.
+--- orig/lib/CodeGen/AsmPrinter/DwarfCompileUnit.h
++++ new/lib/CodeGen/AsmPrinter/DwarfCompileUnit.h
+@@ -32,9 +32,9 @@
+ /// CompileUnit - This dwarf writer support class manages information associated
+ /// with a source file.
+ class CompileUnit {
+-  /// ID - File identifier for source.
++  /// UniqueID - a numeric ID unique among all CUs in the module
+   ///
+-  unsigned ID;
++  unsigned UniqueID;
+ 
+   /// Language - The DW_AT_language of the compile unit
+   ///
+@@ -80,11 +80,11 @@
+   DenseMap<DIE *, const MDNode *> ContainingTypeMap;
+ 
+ public:
+-  CompileUnit(unsigned I, unsigned L, DIE *D, AsmPrinter *A, DwarfDebug *DW);
++  CompileUnit(unsigned UID, unsigned L, DIE *D, AsmPrinter *A, DwarfDebug *DW);
+   ~CompileUnit();
+ 
+   // Accessors.
+-  unsigned getID()                  const { return ID; }
++  unsigned getUniqueID()            const { return UniqueID; }
+   unsigned getLanguage()            const { return Language; }
+   DIE* getCUDie()                   const { return CUDie.get(); }
+   const StringMap<DIE*> &getGlobalTypes() const { return GlobalTypes; }

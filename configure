@@ -1,0 +1,425 @@
+#!/bin/bash
+
+ROOT=$( dirname $0 )
+SCRIPT=$0
+cd $ROOT
+
+. $ROOT/common.inc
+
+#
+# Global variables
+#
+CONF_INC="common.overrides.conf.inc"
+LOCAL_INC="common.overrides.local.inc"
+MINIX_INC="common.overrides.minix.inc"
+CONF_LOG=config.log
+DRY_RUN=${DRY_RUN:-0}
+INDENT=${INDENT:-0}
+BATCH=${BATCH:-0}
+
+#
+# Configuration variables
+#
+CONF_VARS="clean install_pkgs have_llvm have_di di_root have_dr dr_home build_cc \
+    llvm_version llvm_basedir have_pin pin_root have_dune dune_dir minix_conf \
+    ov_PIE ov_dsa ov_gdb ov_segfault"
+
+function conf_init
+{
+    rm -f $CONF_LOG
+    for v in $CONF_VARS
+    do
+        if [ -z ${!v} ]; then
+            eval ${v}="NULL"
+        fi
+    done
+}
+
+function conf_fini
+{
+    str=""
+    for v in $CONF_VARS
+    do
+        if [ "${!v}" != "NULL" ]; then
+            str+="$v=\"${!v}\" "
+        fi
+    done
+    str+="$SCRIPT"
+    echo
+    log "Command reproduce the current configuration:"
+    DRY_RUN=1 cmd_run $str
+    log "Done"
+}
+
+function log
+{
+	# Check for a custom log prefix, or use default.
+	local prefix="[LOG] "
+	if [ "$1" = "[]" ]; then
+		prefix=""
+		shift
+	elif [ "$(echo "$1" | head -c 1)" = "[" ]; then
+		prefix="$1 "
+		shift
+	fi
+
+	(
+		indent_echo
+		echo "${prefix}$@"
+	) 2>&1 | tee -a $CONF_LOG
+}
+
+function indent_inc
+{
+    INDENT=$(( $INDENT + 2 ))
+}
+
+function indent_dec
+{
+    INDENT=$(( $INDENT - 2 ))
+}
+
+function indent_echo
+{
+    [ $INDENT -ne 0 ] || return
+    head -c $INDENT < /dev/zero | tr '\0' ' '
+    echo -n "- "
+}
+
+function cmd_run
+{
+        [ ! -z "$UNDO" ] && UNDO="# To undo: $UNDO"
+	indent_inc
+	log "[CMD]" "$@ $UNDO"
+	indent_dec
+	(
+		if [ $DRY_RUN -eq 0 ]; then
+			eval "$@"
+		fi
+	) 2>&1 | tee -a $CONF_LOG
+}
+
+function apt_install
+{
+	indent_inc
+	log "[INSTALL]" "Installing: ${@}"
+
+	declare -a pkg_installed
+	declare -a pkg_unknown
+	declare -a pkg_doinstall
+	while [ "$1" ]; do
+		p="$1"
+		shift
+		if dpkg -l "$p" 1>/dev/null 2>&1; then
+			pkg_installed+=("$p")
+		elif apt-cache show "$p" 1>/dev/null 2>&1; then
+			pkg_doinstall+=("$p")
+		else
+			pkg_unknown+=("$p")
+		fi
+	done
+
+	indent_inc
+	if (( ${#pkg_installed[@]} > 0 )); then
+		log "[]" "Already installed (skipping): ${pkg_installed[@]}"
+	fi
+	if (( ${#pkg_unknown[@]} > 0 )); then
+		log "[]" "Unknown (skipping): ${pkg_unknown[@]}"
+	fi
+	if (( ${#pkg_doinstall[@]} == 0 )); then
+		log "[]" "Nothing left to install!"
+	else
+		log "[]" "Installing: ${pkg_doinstall[@]}"
+		cmd_run "sudo apt-get install ${pkg_doinstall[@]}"
+	fi
+	indent_dec
+	indent_dec
+}
+
+function get_conf_value
+{
+    local conf_var=$1
+    local msg="$2"
+    local default=$3
+    local values=""
+    [ ! -z $VALUES ] && values="$VALUES, "
+    line="$msg [${values}Default=$default]: "
+    (
+        indent_echo
+        echo -n "$line"
+    ) 2>&1 | tee -a $CONF_LOG
+    if [ "${!conf_var}" == "NULL" ]; then
+        if [ $BATCH -eq 0 ]; then
+            read -r $conf_var
+            echo -en "\e[1A"
+        else
+            eval $conf_var=""
+        fi
+    fi
+    if [ "${!conf_var}" == "" ]; then
+        eval $conf_var=$default
+    fi
+    (
+        echo -en "\e[0K\r"
+        indent_echo
+        echo -n "$line"
+        echo ${!conf_var}
+    ) 2>&1 | tee -a $CONF_LOG
+    RET=${!conf_var}
+}
+
+function get_conf_value_repeat
+{
+    local check=$1
+    shift
+    local conf_var=$1
+    while true
+    do
+        get_conf_value "$@"
+        eval $check $RET || break
+        eval $conf_var="NULL"
+    done
+}
+
+function __get_conf_value_check_list
+{
+    for v in $( echo $VALUES | sed "s/|/ /g" )
+    do
+        [ "$1" == "$v" ] && return 1
+    done
+    return 0
+}
+
+function get_conf_value_list
+{
+    get_conf_value_repeat __get_conf_value_check_list "$@"
+}
+
+function get_conf_value_yn
+{
+    VALUES="y|n" get_conf_value_list "$@"
+}
+
+function __get_conf_value_check_dir
+{
+    [ -d "$RET" ] && return 1
+    return 0
+}
+
+function get_conf_value_dir
+{
+    get_conf_value_repeat __get_conf_value_check_dir "$@"
+}
+
+function __get_conf_value_check_file
+{
+    [ -f "$RET" ] && return 1
+    return 0
+}
+
+function get_conf_value_file
+{
+    get_conf_value_repeat __get_conf_value_check_file "$@"
+}
+
+function save_common_overrides_inc
+{
+    for inc in $*
+    do
+        file=common.overrides.$inc.inc
+        if [ -f $file ]; then
+            cp $file disabled.$file
+        fi
+    done
+}
+
+function restore_common_overrides_inc
+{
+    for inc in $*
+    do
+        file=common.overrides.$inc.inc
+        if [ -f disabled.$file ]; then
+            mv disabled.$file $file
+        fi
+    done
+}
+
+function configure_clean_overrides
+{
+    ( ls "common.overrides.*.inc" &> /dev/null ) && return
+    saved="local minix"
+    get_conf_value_yn clean "[CLEAN] Note: this will remove your common.overrides.*.inc files except common.overrides.{$saved}.inc (if any). Continue?" $1
+    if [ "$clean" == "n" ]; then
+        exit 1
+    fi
+    save_common_overrides_inc $saved
+    cmd_run "rm -f common.overrides.*.inc"
+    restore_common_overrides_inc $saved
+}
+
+function configure_preq_pkgs
+{
+    get_conf_value_yn install_pkgs "[PREQ] Do you want to install a number of useful packages for the project (Ubuntu only, see wiki)?" $1
+    if [ "$install_pkgs" == "y" ]; then
+	# package bundles
+        apt_install build-essential apt-utils dialog sudo vim wget subversion mc python python-dev
+        apt_install cython libssl1.0.0 libssl-dev libncurses5-dev psmisc gdb strace ltrace ftp ssh time netcat automake sendemail
+        apt_install libstdc++6-4.4-dev libdb-dev libx11-dev libxt-dev libxaw7-dev libpcre3-dev zlib1g-dev
+
+	# gcc-multilib for 64bit linux
+	if [ $(arch) = "x86_64" ]; then
+		# default package
+		local gcc_multilib_pkgs="gcc-multilib"
+
+		if update-alternatives --query gcc 1>/dev/null 2>&1; then
+			# add multilib versions for all gcc alternatives
+			gcc_multilib_pkgs+=" $(update-alternatives --query gcc | grep '^Alternative:.*gcc' | sed 's%.*/\([^/]*\)$%\1-multilib%')"
+		elif gcc -v 1>/dev/null 2>&1; then
+			# add multilib version for default gcc
+			gcc_multilib_pkgs+=" $(echo "$(readlink -f "$(which gcc)")" | sed 's%.*/\([^/]*\)$%\1-multilib%')"
+		fi
+
+		# install
+		apt_install $gcc_multilib_pkgs
+	fi
+
+	# dependencies for building llvm
+	# XXX: llvm-3.1 is no longer availabel in recent Ubuntu releases (e.g. 14.04 LTS)
+	cmd_run "sudo apt-get build-dep uuid-dev libpq-dev llvm-3.1 cmake"
+    fi
+
+}
+
+function configure_build_nllvm
+{
+    VALUES="gcc|clang" get_conf_value_list build_cc "[BUILD] Which default compiler do you want to use?" gcc
+    cmd_run "cp conf/common.overrides.llvm-$build_cc.inc common.overrides.llvm.inc"
+}
+
+function configure_build_yllvm
+{
+    local values=$(cd conf && ls common.overrides.llvm*.inc | grep -e minix -e [0-9] | sed "s/common.overrides.llvm-//g" | sed "s/.inc//g" | xargs | tr ' ' '|')
+
+    VALUES="$values" get_conf_value_list llvm_version "[BUILD] Which LLVM version do you want to use?" 3.3
+    cmd_run "cp conf/common.overrides.llvm-$llvm_version.inc common.overrides.llvm.inc"
+    indent_inc
+    get_conf_value_dir llvm_basedir "[BUILD] Your LLVMBASEDIR (LLVMBASEDIR/llvm-$llvm_version=source dir, LLVMBASEDIR/llvm-$llvm_version/bin=installation dir)" $LLVMBASEDIR
+    cmd_run "echo LLVMBASEDIR=$llvm_basedir >> $CONF_INC # To switch versions: cp conf/common.overrides.llvm-xxx.inc common.overrides.llvm.inc"
+    if [[ $llvm_version == minix ]] && [ ! -f common.ovverrides.minix.inc ]; then
+        get_conf_value_yn minix_conf "[BUILD] Building wih MINIX requires running apps/minix/configure.llvm. Do you want to do it now?" y
+        if [ "$minix_conf" == "y" ]; then
+            (cd apps/minix && ./configure.llvm)
+        fi
+    fi
+    indent_dec
+}
+
+function configure_build_llvm
+{
+    get_conf_value_yn have_llvm "[BUILD] Do you want to use LLVM for instrumentation purposes (see wiki for how to install/use)?" $1
+    if [ "$have_llvm" == "y" ]; then
+        configure_build_yllvm
+    else
+        configure_build_nllvm
+    fi
+}
+
+function configure_di
+{
+    get_conf_value_yn have_di "[EXTRA] Do you want to use Dyninst for instrumentation purposes (see wiki for how to install/use)?" $1
+    if [ "$have_di" == "n" ]; then
+        return
+    fi
+    indent_inc
+    get_conf_value_dir di_root "[EXTRA] Your DYNINST_ROOT (DYNINST_ROOT=source dir, DYNINST_ROOT/install=installation dir)" $DYNINST_ROOT
+    cmd_run "echo DYNINST_ROOT=$di_root >> $CONF_INC"
+    UNDO="rm -f common.overrides.dyninst.inc" cmd_run "cp conf/common.overrides.dyninst.inc ."
+    indent_dec
+}
+
+function configure_dr
+{
+    get_conf_value_yn have_dr "[EXTRA] Do you want to use Dynamorio for instrumentation purposes (see wiki for how to install/use)?" $1
+    if [ "$have_dr" == "n" ]; then
+        return
+    fi
+    indent_inc
+    get_conf_value_dir dr_home "[EXTRA] Your DYNAMORIO_HOME (DYNAMORIO_HOME=top-level distribution dir)" $DYNAMORIO_HOME
+    cmd_run "echo DYNAMORIO_HOME=$dr_home >> $CONF_INC"
+    UNDO="rm -f common.overrides.dynamorio.inc" cmd_run "cp conf/common.overrides.dynamorio.inc ."
+    indent_dec
+}
+
+function configure_pin
+{
+    get_conf_value_yn have_pin "[EXTRA] Do you want to use PIN for instrumentation purposes (see wiki for how to install/use)?" $1
+    if [ "$have_pin" == "n" ]; then
+        return
+    fi
+    indent_inc
+    get_conf_value_dir pin_root "[EXTRA] Your PIN_ROOT (PIN_ROOT=path to pin distribution dir)" $PIN_ROOT
+    cmd_run "echo PIN_ROOT=$pin_root >> $CONF_INC"
+    UNDO="rm -f common.overrides.pin.inc" cmd_run "cp conf/common.overrides.pin.inc ."
+    indent_dec
+}
+
+
+function configure_dune
+{
+    get_conf_value_yn have_dune "[EXTRA] Do you want to use DUNE integration?" $1
+    if [ "$have_dune" == "n" ]; then
+        return
+    fi
+    indent_inc
+    get_conf_value_dir dune_dir "[EXTRA] Your DUNE_DIR (DUNE top-level source directory)" $DUNE_DIR
+    cmd_run "echo DUNE_DIR=$dune_dir >> $CONF_INC"
+    UNDO="rm -f common.overrides.dune.inc" cmd_run "cp conf/common.overrides.dune.inc ."
+    UNDO="rm -f common.overrides.dune.link.inc" cmd_run "cp conf/common.overrides.dune.link.inc ."
+    indent_dec
+}
+
+function configure_gen_override
+{
+    local conf_var="ov_${1}"
+    get_conf_value_yn $conf_var "[EXTRA] Do you want to $2?" $3
+    if [ "${!conf_var}" == "n" ]; then
+        return
+    fi
+    UNDO="rm -f common.overrides.$1.inc" cmd_run "cp conf/common.overrides.$1.inc ."
+}
+
+function configure_clean
+{
+    configure_clean_overrides y
+}
+
+function configure_preq
+{
+    configure_preq_pkgs n
+}
+
+function configure_build
+{
+    configure_build_llvm y
+}
+
+function configure_extra
+{
+    configure_di n
+    configure_dr n
+    configure_pin n
+    configure_dune n
+    configure_gen_override PIE "build PIE binaries" n
+    configure_gen_override dsa "use dsa (see README.llvm for how to install)" n
+    configure_gen_override gdb "build unoptimized and GDB-friendly binaries" y
+    configure_gen_override segfault "build binaries with libsegfault" n
+}
+
+conf_init
+
+configure_clean
+configure_preq
+configure_build
+configure_extra
+
+conf_fini

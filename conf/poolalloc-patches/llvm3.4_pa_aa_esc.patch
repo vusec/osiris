@@ -1,0 +1,3930 @@
+From defcbbdf865239986d81547620c83009013bb62c Mon Sep 17 00:00:00 2001
+From: Koustubha Bhat <ksbhat@live.com>
+Date: Wed, 9 Jul 2014 19:31:47 +0200
+Subject: [PATCH] compiling with llvm-3.4
+
+---
+ include/assistDS/DataStructureCallGraph.h  |  108 +++++
+ include/assistDS/Devirt.h                  |    6 +-
+ include/assistDS/Int2PtrCmp.h              |    4 +-
+ include/assistDS/SimplifyGEP.h             |    4 +-
+ include/assistDS/TypeChecks.h              |   10 +-
+ include/assistDS/TypeChecksOpt.h           |    2 +-
+ include/dsa/CallTargets.h                  |    2 +-
+ include/dsa/DSCallGraph.h                  |    3 +-
+ include/dsa/DSSupport.h                    |    2 +-
+ include/dsa/DataStructure.h                |   62 ++-
+ include/dsa/DataStructureAA.h              |  140 ++++++
+ include/dsa/StdLibInfo.h                   |   96 ++++
+ include/dsa/TypeSafety.h                   |    4 +-
+ include/poolalloc/Config/config.h          |  472 ++++++++++++++++++
+ include/poolalloc/PoolAllocate.h           |    6 +-
+ include/poolalloc/RunTimeAssociate.h       |    2 +-
+ include/rdsa/DataStructure.h               |    4 +-
+ lib/AssistDS/ArgCast.cpp                   |    6 +-
+ lib/AssistDS/ArgSimplify.cpp               |    6 +-
+ lib/AssistDS/DSNodeEquivs.cpp              |    6 +-
+ lib/AssistDS/DataStructureCallGraph.cpp    |  126 +++++
+ lib/AssistDS/Devirt.cpp                    |    2 +-
+ lib/AssistDS/DynCount.cpp                  |    2 +-
+ lib/AssistDS/FuncSpec.cpp                  |    2 +-
+ lib/AssistDS/GEPExprArgs.cpp               |    4 +-
+ lib/AssistDS/IndCloner.cpp                 |    6 +-
+ lib/AssistDS/Int2PtrCmp.cpp                |    4 +-
+ lib/AssistDS/LoadArgs.cpp                  |    4 +-
+ lib/AssistDS/MergeGEP.cpp                  |    2 +-
+ lib/AssistDS/SimplifyExtractValue.cpp      |    2 +-
+ lib/AssistDS/SimplifyGEP.cpp               |    4 +-
+ lib/AssistDS/SimplifyInsertValue.cpp       |    4 +-
+ lib/AssistDS/SimplifyLoad.cpp              |    4 +-
+ lib/AssistDS/StructReturnToPointer.cpp     |    4 +-
+ lib/AssistDS/TypeChecks.cpp                |   28 +-
+ lib/AssistDS/TypeChecksOpt.cpp             |   18 +-
+ lib/DSA/AddressTakenAnalysis.cpp           |    6 +-
+ lib/DSA/AllocatorIdentification.cpp        |    6 +-
+ lib/DSA/Basic.cpp                          |    8 +-
+ lib/DSA/DataStructure.cpp                  |    4 +-
+ lib/DSA/DataStructureAA.cpp                |  710 ++++++++++++++++++++++++++++
+ lib/DSA/DataStructureStats.cpp             |    6 +-
+ lib/DSA/EquivClassGraphs.cpp               |    2 +-
+ lib/DSA/Local.cpp                          |   20 +-
+ lib/DSA/Printer.cpp                        |    2 +-
+ lib/DSA/StdLibInfo.cpp                     |  515 ++++++++++++++++++++
+ lib/DSA/StdLibPass.cpp                     |   15 +-
+ lib/DSA/Steensgaard.cpp                    |  164 +++++++
+ lib/DSA/TypeSafety.cpp                     |    2 +-
+ lib/PoolAllocate/Heuristic.cpp             |    2 +-
+ lib/PoolAllocate/PAMultipleGlobalPool.cpp  |    8 +-
+ lib/PoolAllocate/PASimple.cpp              |    8 +-
+ lib/PoolAllocate/PointerCompress.cpp       |    4 +-
+ lib/PoolAllocate/PoolAllocate.cpp          |   14 +-
+ lib/PoolAllocate/PoolOptimize.cpp          |   10 +-
+ lib/PoolAllocate/RunTimeAssociate.cpp      |    2 +-
+ lib/PoolAllocate/TransformFunctionBody.cpp |    2 +-
+ 57 files changed, 2528 insertions(+), 143 deletions(-)
+ create mode 100644 include/dsa/DataStructureAA.h
+ create mode 100644 include/dsa/StdLibInfo.h
+ create mode 100644 include/poolalloc/Config/config.h
+ create mode 100644 lib/DSA/DataStructureAA.cpp
+ create mode 100644 lib/DSA/StdLibInfo.cpp
+ create mode 100644 lib/DSA/Steensgaard.cpp
+
+diff --git a/include/assistDS/DataStructureCallGraph.h b/include/assistDS/DataStructureCallGraph.h
+index e69de29..a7942b3 100644
+--- a/include/assistDS/DataStructureCallGraph.h
++++ b/include/assistDS/DataStructureCallGraph.h
+@@ -0,0 +1,108 @@
++//===- DataStructureCallGraph.h - Provide a CallGraph using DSA -----------===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This file declares the DataStructureCallGraph implementation of the
++// CallGraph analysis. Based on llvm/lib/Analysis/IPA/CallGraph.cpp.
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef _DATA_STRUCTURE_CALLGRAPH_H
++#define _DATA_STRUCTURE_CALLGRAPH_H
++
++#include "dsa/CallTargets.h"
++#include "dsa/DataStructure.h"
++
++#include "llvm/IR/Module.h"
++#include "llvm/Analysis/CallGraph.h"
++#include "llvm/Support/Debug.h"
++#include "llvm/Support/raw_ostream.h"
++
++namespace llvm {
++
++class DataStructureCallGraph : public CallGraph {
++  // Root is root of the call graph, or the external node if a 'main' function
++  // couldn't be found.
++  CallGraphNode *Root;
++
++  // ExternalCallingNode - This node has edges to all external functions and
++  // those internal functions that have their address taken.
++  CallGraphNode *ExternalCallingNode;
++
++  // CallsExternalNode - This node has edges to it from all functions making
++  // indirect calls or calling an external function.
++  CallGraphNode *CallsExternalNode;
++
++  typedef dsa::CallTargetFinder<TDDataStructures> CallTargetFinderTy;
++
++public:
++  static char ID;
++  DataStructureCallGraph() :
++    Root(0), ExternalCallingNode(0), CallsExternalNode(0) { }
++
++  virtual bool runOnModule(Module &M);
++
++  virtual void getAnalysisUsage(AnalysisUsage &AU) const {
++    AU.addRequired<TDDataStructures>();
++    AU.addRequired<CallTargetFinderTy>();
++    AU.setPreservesAll();
++  }
++
++  virtual void print(raw_ostream &OS, const Module *) const {
++    OS << "CallGraph Root is: ";
++    if (Function *F = getRoot()->getFunction())
++      OS << F->getName() << "\n";
++    else {
++      OS << "<<null function: 0x" << getRoot() << ">>\n";
++    }
++    
++    CallGraph::print(OS, 0);
++  }
++
++  virtual void releaseMemory() {
++    destroy();
++  }
++  
++  // getAdjustedAnalysisPointer - This method is used when a pass implements an
++  // analysis interface through multiple inheritance. If needed, it should
++  // override this to adjust the this pointer as needed for the specified pass
++  // info.
++  virtual void *getAdjustedAnalysisPointer(AnalysisID PI) {
++    if (PI == &CallGraph::ID)
++      return (CallGraph*)this;
++    return this;
++  }
++  
++  CallGraphNode* getExternalCallingNode() const { return ExternalCallingNode; }
++  CallGraphNode* getCallsExternalNode()   const { return CallsExternalNode; }
++
++  // getRoot - Return the root of the call graph, which is either main, or if
++  // main cannot be found, the external node.
++  CallGraphNode *getRoot()             { return Root; }
++  const CallGraphNode *getRoot() const { return Root; }
++
++private:
++  // addToCallGraph - Add a function to the call graph, and link the node to all
++  // of the functions that it calls.
++  void addToCallGraph(Function *F);
++
++  // destroy - Release memory for the call graph
++  virtual void destroy() {
++    // CallsExternalNode is not in the function map, delete it explicitly.
++    if (CallsExternalNode) {
++      CallsExternalNode->allReferencesDropped();
++      delete CallsExternalNode;
++      CallsExternalNode = 0;
++    }
++    releaseMemory();
++  }
++};
++
++}
++
++#endif // _DATA_STRUCTURE_CALLGRAPH_H
+diff --git a/include/assistDS/Devirt.h b/include/assistDS/Devirt.h
+index 0dba3ac..ee386ac 100644
+--- a/include/assistDS/Devirt.h
++++ b/include/assistDS/Devirt.h
+@@ -21,7 +21,7 @@
+ #include "llvm/IR/Function.h"
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/IR/DerivedTypes.h"
+-#include "llvm/IR/InstVisitor.h"
++#include "llvm/InstVisitor.h"
+ #include "llvm/IR/DataLayout.h"
+ 
+ using namespace llvm;
+@@ -41,7 +41,7 @@ namespace llvm {
+       dsa::CallTargetFinder<EQTDDataStructures> *CTF;
+ 
+       // Access to the target data analysis pass
+-      const DataLayout * TD;
++      DataLayout * TD;
+ 
+       // Worklist of call sites to transform
+       std::vector<Instruction *> Worklist;
+@@ -63,7 +63,7 @@ namespace llvm {
+ 
+       virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+         AU.addRequired<dsa::CallTargetFinder<EQTDDataStructures> >();
+-        AU.addRequired<DataLayoutPass>();
++        AU.addRequired<DataLayout>();
+       }
+ 
+       // Visitor methods for analyzing instructions
+diff --git a/include/assistDS/Int2PtrCmp.h b/include/assistDS/Int2PtrCmp.h
+index 414b2ed..eca1d42 100644
+--- a/include/assistDS/Int2PtrCmp.h
++++ b/include/assistDS/Int2PtrCmp.h
+@@ -26,13 +26,13 @@ namespace llvm {
+   //
+   class Int2PtrCmp : public ModulePass {
+   private:
+-    const DataLayout * TD;
++    DataLayout * TD;
+   public:
+     static char ID;
+     Int2PtrCmp() : ModulePass(ID) {}
+     virtual bool runOnModule(Module& M);
+     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+-      AU.addRequired<DataLayoutPass>();
++      AU.addRequired<DataLayout>();
+     }
+ 
+   };
+diff --git a/include/assistDS/SimplifyGEP.h b/include/assistDS/SimplifyGEP.h
+index 5501509..12a7797 100644
+--- a/include/assistDS/SimplifyGEP.h
++++ b/include/assistDS/SimplifyGEP.h
+@@ -22,13 +22,13 @@ namespace llvm {
+   //
+   class SimplifyGEP : public ModulePass {
+   private:
+-    const DataLayout * TD;
++    DataLayout * TD;
+   public:
+     static char ID;
+     SimplifyGEP() : ModulePass(ID) {}
+     virtual bool runOnModule(Module& M);
+     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+-      AU.addRequired<DataLayoutPass>();
++      AU.addRequired<DataLayout>();
+     }
+   };
+ }
+diff --git a/include/assistDS/TypeChecks.h b/include/assistDS/TypeChecks.h
+index 92de3b6..279edd2 100644
+--- a/include/assistDS/TypeChecks.h
++++ b/include/assistDS/TypeChecks.h
+@@ -20,8 +20,8 @@
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/IR/Function.h"
+ #include "llvm/Pass.h"
+-#include "llvm/IR/CallSite.h"
+-#include "llvm/IR/Dominators.h"
++#include "llvm/Support/CallSite.h"
++#include "llvm/Analysis/Dominators.h"
+ #include "llvm/Analysis/LoopInfo.h"
+ 
+ #include <map>
+@@ -49,7 +49,7 @@ private:
+   std::map<BitCastInst*, Instruction*> BitCast_MD_Map;
+ 
+   // Analysis from other passes.
+-  const DataLayout *TD;
++  DataLayout *TD;
+   AddressTakenAnalysis* addrAnalysis;
+   
+   unsigned int getTypeMarker(Type*);
+@@ -100,8 +100,8 @@ public:
+   virtual void print(raw_ostream &OS, const Module *M) const;
+ 
+   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+-    AU.addRequired<DataLayoutPass>();
+-    AU.addRequired<DominatorTreeWrapperPass>();
++    AU.addRequired<DataLayout>();
++    AU.addRequired<DominatorTree>();
+     AU.addRequired<LoopInfo>();
+     AU.addRequired<AddressTakenAnalysis>();
+   }
+diff --git a/include/assistDS/TypeChecksOpt.h b/include/assistDS/TypeChecksOpt.h
+index 0bf0e5d..b2ae741 100644
+--- a/include/assistDS/TypeChecksOpt.h
++++ b/include/assistDS/TypeChecksOpt.h
+@@ -19,7 +19,7 @@
+ #include "llvm/Pass.h"
+ #include "llvm/IR/DataLayout.h"
+ #include "llvm/IR/Instructions.h"
+-#include "llvm/IR/CallSite.h"
++#include "llvm/Support/CallSite.h"
+ 
+ #include <list>
+ 
+diff --git a/include/dsa/CallTargets.h b/include/dsa/CallTargets.h
+index 7130340..344cc54 100644
+--- a/include/dsa/CallTargets.h
++++ b/include/dsa/CallTargets.h
+@@ -16,7 +16,7 @@
+ #define LLVM_ANALYSIS_CALLTARGETS_H
+ 
+ #include "llvm/Pass.h"
+-#include "llvm/IR/CallSite.h"
++#include "llvm/Support/CallSite.h"
+ #include "dsa/DataStructure.h"
+ 
+ #include <set>
+diff --git a/include/dsa/DSCallGraph.h b/include/dsa/DSCallGraph.h
+index b39a662..76913bb 100644
+--- a/include/dsa/DSCallGraph.h
++++ b/include/dsa/DSCallGraph.h
+@@ -19,7 +19,7 @@
+ 
+ #include <cstddef>
+ #include "llvm/ADT/EquivalenceClasses.h"
+-#include "llvm/IR/CallSite.h"
++#include "llvm/Support/CallSite.h"
+ 
+ #include <cassert>
+ #include <map>
+@@ -75,6 +75,7 @@ public:
+   typedef llvm::EquivalenceClasses<const llvm::Function*>::member_iterator scc_iterator;
+ 
+   void insert(llvm::CallSite CS, const llvm::Function* F);
++  void erase(llvm::CallSite CS, const llvm::Function* F);
+ 
+   void insureEntry(const llvm::Function* F);
+ 
+diff --git a/include/dsa/DSSupport.h b/include/dsa/DSSupport.h
+index 8d58bb4..d233bb0 100644
+--- a/include/dsa/DSSupport.h
++++ b/include/dsa/DSSupport.h
+@@ -20,7 +20,7 @@
+ #include <set>
+ 
+ #include "llvm/ADT/DenseSet.h"
+-#include "llvm/IR/CallSite.h"
++#include "llvm/Support/CallSite.h"
+ 
+ namespace llvm {
+ 
+diff --git a/include/dsa/DataStructure.h b/include/dsa/DataStructure.h
+index bd2be48..9bb435e 100644
+--- a/include/dsa/DataStructure.h
++++ b/include/dsa/DataStructure.h
+@@ -19,10 +19,11 @@
+ #include "dsa/super_set.h"
+ #include "dsa/AddressTakenAnalysis.h"
+ #include "dsa/AllocatorIdentification.h"
++#include "dsa/StdLibInfo.h"
+ 
+ #include "llvm/Pass.h"
+ #include "llvm/IR/DataLayout.h"
+-#include "llvm/IR/CallSite.h"
++#include "llvm/Support/CallSite.h"
+ #include "llvm/ADT/EquivalenceClasses.h"
+ #include "llvm/ADT/DenseSet.h"
+ 
+@@ -45,7 +46,7 @@ class DataStructures : public ModulePass {
+   typedef std::map<const Function*, DSGraph*> DSInfoTy;
+ 
+   /// DataLayout, comes in handy
+-  const DataLayout* TD;
++  DataLayout* TD;
+ 
+   /// Pass to get Graphs from
+   DataStructures* GraphSource;
+@@ -87,7 +88,7 @@ protected:
+   std::vector<const Function*> GlobalFunctionList; 
+ 
+   void init(DataStructures* D, bool clone, bool useAuxCalls, bool copyGlobalAuxCalls, bool resetAux);
+-  void init(const DataLayout* T);
++  void init(DataLayout* T);
+ 
+   void formGlobalECs();
+   
+@@ -139,7 +140,7 @@ public:
+ 
+   EquivalenceClasses<const GlobalValue*> &getGlobalECs() { return GlobalECs; }
+ 
+-  const DataLayout& getDataLayout() const { return *TD; }
++  DataLayout& getDataLayout() const { return *TD; }
+ 
+   const DSCallGraph& getCallGraph() const { return callgraph; }
+ 
+@@ -165,7 +166,7 @@ public:
+   /// getAnalysisUsage - This obviously provides a data structure graph.
+   ///
+   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+-    AU.addRequired<DataLayoutPass>();
++    AU.addRequired<DataLayout>();
+     AU.setPreservesAll();
+   }
+ };
+@@ -188,7 +189,7 @@ public:
+   /// getAnalysisUsage - This obviously provides a data structure graph.
+   ///
+   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+-    AU.addRequired<DataLayoutPass>();
++    AU.addRequired<DataLayout>();
+     AU.addRequired<AddressTakenAnalysis>();
+     AU.setPreservesAll();
+   }
+@@ -201,6 +202,7 @@ class StdLibDataStructures : public DataStructures {
+   void processRuntimeCheck (Module & M, std::string name, unsigned arg);
+   void processFunction(int x, Function *F);
+   AllocIdentify *AllocWrappersAnalysis;
++  StdLibInfo stdLibInfo;
+ public:
+   static char ID;
+   StdLibDataStructures() : DataStructures(ID, "stdlib.") {}
+@@ -215,6 +217,7 @@ public:
+     AU.addRequired<AllocIdentify>();
+     AU.setPreservesAll();
+   }
++  StdLibInfo& getStdLibInfo() { return stdLibInfo; }
+ };
+ 
+ /// BUDataStructures - The analysis that computes the interprocedurally closed
+@@ -400,6 +403,53 @@ public:
+   ~EQTDDataStructures();
+ };
+ 
++/// SteensgaardsDataStructures - Analysis that computes a context-insensitive
++/// data structure graphs for the whole program.  This is done by merging all
++/// function graphs generated by
++///
++class SteensgaardDataStructures : public DataStructures {
++  DSGraph *ResultGraph;
++  DataStructures *DS;
++  void ResolveFunctionCall(const Function *F, const DSCallSite &Call,
++                             DSNodeHandle &RetVal);
++  bool runOnModuleInternal(Module &M);
++
++public:
++  static char ID;
++  SteensgaardDataStructures()
++    : DataStructures(ID, "steensgaard."), ResultGraph(NULL)
++  {}
++  ~SteensgaardDataStructures();
++
++  virtual bool runOnModule(Module &M);
++  virtual void releaseMemory();
++
++  virtual void getAnalysisUsage(AnalysisUsage &AU) const {
++    AU.addRequired<DataLayout>();
++    AU.addRequired<EQTDDataStructures>();
++    AU.setPreservesAll();
++  }
++
++  void print(llvm::raw_ostream &O, const Module *M) const;
++
++  /// getDSGraph - Return the data structure graph for the specified function.
++  ///
++  virtual DSGraph *getDSGraph(const Function &F) const {
++    return getResultGraph();
++  }
++
++  virtual bool hasDSGraph(const Function &F) const {
++    return true;
++  }
++
++  /// getResultGraph - Return the data structure graph for the whole program.
++  ///
++  DSGraph *getResultGraph() const {
++    return ResultGraph;
++  }
++};
++
++
+ } // End llvm namespace
+ 
+ #endif
+diff --git a/include/dsa/DataStructureAA.h b/include/dsa/DataStructureAA.h
+new file mode 100644
+index 0000000..31f7890
+--- /dev/null
++++ b/include/dsa/DataStructureAA.h
+@@ -0,0 +1,140 @@
++//===- DataStructureAA.h - Data Structure Based Alias Analysis ------------===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file was developed by the LLVM research group and is distributed under
++// the University of Illinois Open Source License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This pass uses the top-down data structure graphs to implement a simple
++// context sensitive alias analysis.
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_ANALYSIS_DATASTRUCTUREAA_H
++#define LLVM_ANALYSIS_DATASTRUCTUREAA_H
++
++#include "llvm/IR/Constants.h"
++#include "llvm/IR/DerivedTypes.h"
++#include "llvm/IR/Module.h"
++#include "llvm/Analysis/AliasAnalysis.h"
++#include "llvm/Analysis/Passes.h"
++#include "dsa/DataStructure.h"
++#include "dsa/DSGraph.h"
++
++namespace llvm {
++
++class DSAA : public ModulePass, public AliasAnalysis {
++private:
++  StdLibDataStructures *StdLib;
++  EQTDDataStructures *TD;
++  EquivBUDataStructures *BU;
++  SteensgaardDataStructures *Steens;
++
++  // The set of functions which may invoke a memory barrier, including via a
++  // transitive call
++  std::set<const Function*> MemoryBarriers;
++
++  // The set of nodes which may escape from a single thread to multiple threads
++  // These are nodes in the Steensgaard DSGraph
++  DenseSet<const DSNode*> EscapingNodes;
++
++  // These members are used to cache mod/ref information to make us return
++  // results faster, particularly for aa-eval.  On the first request of
++  // mod/ref information for a particular call site, we compute and store the
++  // calculated nodemap for the call site.  Any time DSA info is updated we
++  // free this information, and when we move onto a new call site, this
++  // information is also freed.
++  CallSite MapCS;
++  std::multimap<DSNode*, const DSNode*> CallerCalleeMap;
++  bool valid;
++
++private:
++  void invalidateCache();
++
++  void enumerateMemoryBarriers();
++  bool enumerateMemoryBarriers(const DSCallGraph &CG,
++                               const Function *F,
++                               DenseSet<const Function*> *visited);
++  void dumpMemoryBarriers(raw_ostream &os);
++
++  void enumerateEscapingNodes(Module &M);
++  void dumpEscapingNodes(raw_ostream &os, Module &M);
++
++  DSGraph *getFunctionGraphForValue(const Value *V);
++
++  std::pair<bool, ModRefResult>
++  getModRefInfoForCallee(ImmutableCallSite CS,
++                         const Location &Loc,
++                         const Function *Callee);
++
++  ModRefResult
++  mergeChainedModRefInfo(ImmutableCallSite CS,
++                         const Location &Loc,
++                         ModRefResult mayinfo);
++
++public:
++  static char ID;
++  DSAA();
++  virtual ~DSAA();
++
++  //------------------------------------------------
++  // Implement the Pass API
++  //
++
++  virtual bool runOnModule(Module &M);
++  virtual void releaseMemory();
++  virtual void getAnalysisUsage(AnalysisUsage &AU) const;
++
++  /// getAdjustedAnalysisPointer - This method is used when a pass implements
++  /// an analysis interface through multiple inheritance.  If needed, it
++  /// should override this to adjust the this pointer as needed for the
++  /// specified pass info.
++  virtual void *getAdjustedAnalysisPointer(const void *ID) {
++    if (ID == &AliasAnalysis::ID)
++      return (AliasAnalysis*)this;
++    return this;
++  }
++
++  //------------------------------------------------
++  // Implement an EscapeAnalysis API
++  //
++
++  bool mightValueEscapeThread(const Value *V);
++
++  //------------------------------------------------
++  // Implement the AliasAnalysis API
++  //
++
++  virtual AliasResult alias(const Location &Loc1, const Location &Loc2);
++
++  virtual ModRefResult getModRefInfo(ImmutableCallSite CS,
++                                     const Location &Loc);
++
++  virtual ModRefResult getModRefInfo(ImmutableCallSite CS1,
++                                     ImmutableCallSite CS2) {
++    return AliasAnalysis::getModRefInfo(CS1,CS2);
++  }
++
++  virtual void deleteValue(Value *V) {
++    assert(valid && "DSAA invalidated but then queried?!");
++    invalidateCache();
++    BU->deleteValue(V);
++    TD->deleteValue(V);
++    AliasAnalysis::deleteValue(V);
++  }
++
++  virtual void copyValue(Value *From, Value *To) {
++    assert(valid && "DSAA invalidated but then queried?!");
++    if (From == To) return;
++    invalidateCache();
++    BU->copyValue(From, To);
++    TD->copyValue(From, To);
++    AliasAnalysis::copyValue(From, To);
++  }
++};
++
++} // End llvm namespace
++
++#endif
+diff --git a/include/dsa/StdLibInfo.h b/include/dsa/StdLibInfo.h
+new file mode 100644
+index 0000000..7a272c9
+--- /dev/null
++++ b/include/dsa/StdLibInfo.h
+@@ -0,0 +1,96 @@
++//===- DataStructure.h - Build data structure graphs ------------*- C++ -*-===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file was developed by the LLVM research group and is distributed under
++// the University of Illinois Open Source License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// Info about common standard c library functions
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_ANALYSIS_STDLIBINFO_H
++#define LLVM_ANALYSIS_STDLIBINFO_H
++
++#include "llvm/IR/Intrinsics.h"
++#include "llvm/ADT/StringRef.h"
++#include <map>
++
++namespace llvm {
++class Module;
++class Function;
++
++class StdLibInfo {
++public:
++  enum { numOps = 10 };
++  //
++  // Structure: libAction
++  //
++  // Description:
++  //  Describe how the DSGraph of a function should be built.  Note that for the
++  //  boolean arrays of arity numOps, the first element is a flag describing the
++  //  return value, and the remaining elements are flags describing the
++  //  function's arguments.
++  //
++  struct LibAction {
++    // The return value/arguments that should be marked read.
++    bool read[numOps];
++
++    // The return value/arguments that should be marked modified.
++    bool write[numOps];
++
++    // The return value/arguments that should be marked as heap.
++    bool heap[numOps];
++
++    // Flags whether the return value should be merged with all arguments.
++    bool mergeNodes[numOps];
++
++    // Flags whether the return value and arguments should be folded.
++    bool collapse;
++
++    // Flags whether the function implies a memory barrier (accesses cannot
++    // be optimized across this barrier).  Used by DSAA::getModRefInfo, but
++    // not used to build DSGraphs as it does not affect the points-to relation.
++    bool memoryBarrier;
++
++    // Specify whether this function is a thread creation function.  If not,
++    // these are -1.  If so, these are the argument indices for the thread spawn
++    // function and the argument pass to the thread spawn function.  Argument
++    // indices start at 0.  For building DSGraphs, this adds a call to the spawn
++    // function with the given argument.
++    int threadFnArg;        // e.g., this is 2 for pthread_create
++    int threadFnParamArg;   // e.g., this is 3 for pthread_create
++  };
++
++private:
++  typedef std::map<const Function*, const LibAction*> FunctionMapTy;
++  typedef std::map<Intrinsic::ID, const LibAction*> IntrinsicMapTy;
++
++  Module *module;
++  FunctionMapTy functionMap;
++  IntrinsicMapTy intrinsicMap;
++
++public:
++  StdLibInfo() : module(NULL) {}
++  ~StdLibInfo() {}
++
++  // Call this before querying for getLibActionForFunction().
++  void initialize(Module &M);
++
++  // Returns the LibAction for the specified function, if it exists,
++  // and otherwise returns NULL.
++  const LibAction* getLibActionForFunction(const Function *F) const;
++
++  // Returns the LibAction for the specified function, if it exists,
++  // and otherwise returns NULL.  Note that this works even if this
++  // class hasn't been initialized.
++  const LibAction* getLibActionForFunctionName(StringRef name) const;
++};
++
++
++} // End llvm namespace
++
++#endif
++
+diff --git a/include/dsa/TypeSafety.h b/include/dsa/TypeSafety.h
+index 3317997..ee07402 100644
+--- a/include/dsa/TypeSafety.h
++++ b/include/dsa/TypeSafety.h
+@@ -49,7 +49,7 @@ struct TypeSafety : public ModulePass {
+     bool typeFieldsOverlap (const DSNode * N);
+ 
+     // Pointers to prerequisite passes
+-    const DataLayout * TD;
++    DataLayout * TD;
+     dsa * dsaPass;
+ 
+     // Data structures
+@@ -65,7 +65,7 @@ struct TypeSafety : public ModulePass {
+     }
+ 
+     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+-      AU.addRequired<DataLayoutPass>();
++      AU.addRequired<DataLayout>();
+       AU.addRequired<dsa>();
+       AU.setPreservesAll();
+     }
+diff --git a/include/poolalloc/Config/config.h b/include/poolalloc/Config/config.h
+new file mode 100644
+index 0000000..a7cf874
+--- /dev/null
++++ b/include/poolalloc/Config/config.h
+@@ -0,0 +1,472 @@
++/* include/poolalloc/Config/config.h.  Generated by configure.  */
++/* include/poolalloc/Config/config.h.in.  Generated from autoconf/configure.ac by autoheader.  */
++
++/* Define if dlopen(0) will open the symbols of the program */
++/* #undef CAN_DLOPEN_SELF */
++
++/* Define to one of `_getb67', `GETB67', `getb67' for Cray-2 and Cray-YMP
++   systems. This function is required for `alloca.c' support on those systems.
++   */
++/* #undef CRAY_STACKSEG_END */
++
++/* Define to 1 if using `alloca.c'. */
++/* #undef C_ALLOCA */
++
++/* Define to 1 if you have `alloca', as a function or macro. */
++/* #undef HAVE_ALLOCA */
++
++/* Define to 1 if you have <alloca.h> and it should be used (not on Ultrix).
++   */
++/* #undef HAVE_ALLOCA_H */
++
++/* Define to 1 if you have the `argz_append' function. */
++/* #undef HAVE_ARGZ_APPEND */
++
++/* Define to 1 if you have the `argz_create_sep' function. */
++/* #undef HAVE_ARGZ_CREATE_SEP */
++
++/* Define to 1 if you have the <argz.h> header file. */
++/* #undef HAVE_ARGZ_H */
++
++/* Define to 1 if you have the `argz_insert' function. */
++/* #undef HAVE_ARGZ_INSERT */
++
++/* Define to 1 if you have the `argz_next' function. */
++/* #undef HAVE_ARGZ_NEXT */
++
++/* Define to 1 if you have the `argz_stringify' function. */
++/* #undef HAVE_ARGZ_STRINGIFY */
++
++/* Define to 1 if you have the <assert.h> header file. */
++/* #undef HAVE_ASSERT_H */
++
++/* Define to 1 if you have the `backtrace' function. */
++/* #undef HAVE_BACKTRACE */
++
++/* Define to 1 if you have the `bcopy' function. */
++/* #undef HAVE_BCOPY */
++
++/* Does not have bi-directional iterator */
++/* #undef HAVE_BI_ITERATOR */
++
++/* Define to 1 if you have the `closedir' function. */
++/* #undef HAVE_CLOSEDIR */
++
++/* Define to 1 if you have the <ctype.h> header file. */
++/* #undef HAVE_CTYPE_H */
++
++/* Define to 1 if you have the <dirent.h> header file, and it defines `DIR'.
++   */
++/* #undef HAVE_DIRENT_H */
++
++/* Define if you have the GNU dld library. */
++/* #undef HAVE_DLD */
++
++/* Define to 1 if you have the <dld.h> header file. */
++/* #undef HAVE_DLD_H */
++
++/* Define to 1 if you have the `dlerror' function. */
++/* #undef HAVE_DLERROR */
++
++/* Define to 1 if you have the <dlfcn.h> header file. */
++/* #undef HAVE_DLFCN_H */
++
++/* Define if dlopen() is available on this platform. */
++/* #undef HAVE_DLOPEN */
++
++/* Define to 1 if you have the <dl.h> header file. */
++/* #undef HAVE_DL_H */
++
++/* Define if you have the _dyld_func_lookup function. */
++/* #undef HAVE_DYLD */
++
++/* Define to 1 if you have the <errno.h> header file. */
++/* #undef HAVE_ERRNO_H */
++
++/* Define to 1 if the system has the type `error_t'. */
++/* #undef HAVE_ERROR_T */
++
++/* Define to 1 if you have the <execinfo.h> header file. */
++/* #undef HAVE_EXECINFO_H */
++
++/* Define to 1 if you have the <fcntl.h> header file. */
++#define HAVE_FCNTL_H 1
++
++/* Set to 1 if the finite function is found in <ieeefp.h> */
++/* #undef HAVE_FINITE_IN_IEEEFP_H */
++
++/* Does not have forward iterator */
++/* #undef HAVE_FWD_ITERATOR */
++
++/* Define to 1 if you have the `getcwd' function. */
++/* #undef HAVE_GETCWD */
++
++/* Define to 1 if you have the `getpagesize' function. */
++#define HAVE_GETPAGESIZE 1
++
++/* Define to 1 if you have the `getrusage' function. */
++/* #undef HAVE_GETRUSAGE */
++
++/* Define to 1 if you have the `gettimeofday' function. */
++/* #undef HAVE_GETTIMEOFDAY */
++
++/* Does not have <hash_map> */
++/* #undef HAVE_GLOBAL_HASH_MAP */
++
++/* Does not have hash_set in global namespace */
++/* #undef HAVE_GLOBAL_HASH_SET */
++
++/* Does not have ext/hash_map */
++/* #undef HAVE_GNU_EXT_HASH_MAP */
++
++/* Does not have hash_set in gnu namespace */
++/* #undef HAVE_GNU_EXT_HASH_SET */
++
++/* Define to 1 if you have the `index' function. */
++/* #undef HAVE_INDEX */
++
++/* Define to 1 if the system has the type `int64_t'. */
++/* #undef HAVE_INT64_T */
++
++/* Define to 1 if you have the <inttypes.h> header file. */
++#define HAVE_INTTYPES_H 1
++
++/* Define to 1 if you have the `isatty' function. */
++/* #undef HAVE_ISATTY */
++
++/* Set to 1 if the isinf function is found in <cmath> */
++/* #undef HAVE_ISINF_IN_CMATH */
++
++/* Set to 1 if the isinf function is found in <math.h> */
++/* #undef HAVE_ISINF_IN_MATH_H */
++
++/* Set to 1 if the isnan function is found in <cmath> */
++/* #undef HAVE_ISNAN_IN_CMATH */
++
++/* Set to 1 if the isnan function is found in <math.h> */
++/* #undef HAVE_ISNAN_IN_MATH_H */
++
++/* Define if you have the libdl library or equivalent. */
++/* #undef HAVE_LIBDL */
++
++/* Define to 1 if you have the `elf' library (-lelf). */
++/* #undef HAVE_LIBELF */
++
++/* Define to 1 if you have the <limits.h> header file. */
++/* #undef HAVE_LIMITS_H */
++
++/* Define to 1 if you have the <link.h> header file. */
++/* #undef HAVE_LINK_H */
++
++/* Define if you can use -Wl,-R. to pass -R. to the linker, in order to add
++   the current directory to the dynamic linker search path. */
++/* #undef HAVE_LINK_R */
++
++/* Define if lt_dlopen() is available on this platform */
++/* #undef HAVE_LT_DLOPEN */
++
++/* Define to 1 if you have the <mach-o/dyld.h> header file. */
++/* #undef HAVE_MACH_O_DYLD_H */
++
++/* Define if mallinfo() is available on this platform. */
++/* #undef HAVE_MALLINFO */
++
++/* Define to 1 if you have the <malloc.h> header file. */
++/* #undef HAVE_MALLOC_H */
++
++/* Define to 1 if you have the `memcpy' function. */
++/* #undef HAVE_MEMCPY */
++
++/* Define to 1 if you have the `memmove' function. */
++/* #undef HAVE_MEMMOVE */
++
++/* Define to 1 if you have the <memory.h> header file. */
++#define HAVE_MEMORY_H 1
++
++/* Define to 1 if you have the `mkdtemp' function. */
++/* #undef HAVE_MKDTEMP */
++
++/* Define to 1 if you have the `mkstemp' function. */
++/* #undef HAVE_MKSTEMP */
++
++/* Define to 1 if you have the `mktemp' function. */
++/* #undef HAVE_MKTEMP */
++
++/* Define to 1 if you have a working `mmap' system call. */
++#define HAVE_MMAP 1
++
++/* Define if mmap() uses MAP_ANONYMOUS to map anonymous pages, or undefine if
++   it uses MAP_ANON */
++#define HAVE_MMAP_ANONYMOUS 1
++
++/* Define if mmap() can map files into memory */
++#define HAVE_MMAP_FILE 
++
++/* define if the compiler implements namespaces */
++/* #undef HAVE_NAMESPACES */
++
++/* Define to 1 if you have the <ndir.h> header file, and it defines `DIR'. */
++/* #undef HAVE_NDIR_H */
++
++/* Define to 1 if you have the `opendir' function. */
++/* #undef HAVE_OPENDIR */
++
++/* Define if libtool can extract symbol lists from object files. */
++/* #undef HAVE_PRELOADED_SYMBOLS */
++
++/* Define to have the %a format string */
++/* #undef HAVE_PRINTF_A */
++
++/* Have pthread_mutex_lock */
++/* #undef HAVE_PTHREAD_MUTEX_LOCK */
++
++/* Define to 1 if srand48/lrand48/drand48 exist in <stdlib.h> */
++/* #undef HAVE_RAND48 */
++
++/* Define to 1 if you have the `readdir' function. */
++/* #undef HAVE_READDIR */
++
++/* Define to 1 if you have the `realpath' function. */
++/* #undef HAVE_REALPATH */
++
++/* Define to 1 if you have the `rindex' function. */
++/* #undef HAVE_RINDEX */
++
++/* Define to 1 if you have the <rw/stdex/hash_map.h> header file. */
++/* #undef HAVE_RW_STDEX_HASH_MAP_H */
++
++/* Define to 1 if you have the <rw/stdex/hash_set.h> header file. */
++/* #undef HAVE_RW_STDEX_HASH_SET_H */
++
++/* Define to 1 if you have the `sbrk' function. */
++/* #undef HAVE_SBRK */
++
++/* Define to 1 if you have the `setrlimit' function. */
++/* #undef HAVE_SETRLIMIT */
++
++/* Define if you have the shl_load function. */
++/* #undef HAVE_SHL_LOAD */
++
++/* Define to 1 if you have the <signal.h> header file. */
++/* #undef HAVE_SIGNAL_H */
++
++/* Define to 1 if you have the <stdint.h> header file. */
++#define HAVE_STDINT_H 1
++
++/* Define to 1 if you have the <stdio.h> header file. */
++/* #undef HAVE_STDIO_H */
++
++/* Define to 1 if you have the <stdlib.h> header file. */
++#define HAVE_STDLIB_H 1
++
++/* Does not have ext/hash_map> */
++/* #undef HAVE_STD_EXT_HASH_MAP */
++
++/* Does not have hash_set in std namespace */
++/* #undef HAVE_STD_EXT_HASH_SET */
++
++/* Set to 1 if the std::isinf function is found in <cmath> */
++/* #undef HAVE_STD_ISINF_IN_CMATH */
++
++/* Set to 1 if the std::isnan function is found in <cmath> */
++/* #undef HAVE_STD_ISNAN_IN_CMATH */
++
++/* Does not have std namespace iterator */
++/* #undef HAVE_STD_ITERATOR */
++
++/* Define to 1 if you have the `strchr' function. */
++/* #undef HAVE_STRCHR */
++
++/* Define to 1 if you have the `strcmp' function. */
++/* #undef HAVE_STRCMP */
++
++/* Define to 1 if you have the `strdup' function. */
++/* #undef HAVE_STRDUP */
++
++/* Define to 1 if you have the `strerror' function. */
++/* #undef HAVE_STRERROR */
++
++/* Define to 1 if you have the `strerror_r' function. */
++/* #undef HAVE_STRERROR_R */
++
++/* Define to 1 if you have the <strings.h> header file. */
++#define HAVE_STRINGS_H 1
++
++/* Define to 1 if you have the <string.h> header file. */
++#define HAVE_STRING_H 1
++
++/* Define to 1 if you have the `strrchr' function. */
++/* #undef HAVE_STRRCHR */
++
++/* Define to 1 if you have the `strtoll' function. */
++/* #undef HAVE_STRTOLL */
++
++/* Define to 1 if you have the `strtoq' function. */
++/* #undef HAVE_STRTOQ */
++
++/* Define to 1 if you have the `sysconf' function. */
++/* #undef HAVE_SYSCONF */
++
++/* Define to 1 if you have the <sys/dir.h> header file, and it defines `DIR'.
++   */
++/* #undef HAVE_SYS_DIR_H */
++
++/* Define to 1 if you have the <sys/dl.h> header file. */
++/* #undef HAVE_SYS_DL_H */
++
++/* Define to 1 if you have the <sys/mman.h> header file. */
++#define HAVE_SYS_MMAN_H 1
++
++/* Define to 1 if you have the <sys/ndir.h> header file, and it defines `DIR'.
++   */
++/* #undef HAVE_SYS_NDIR_H */
++
++/* Define to 1 if you have the <sys/param.h> header file. */
++/* #undef HAVE_SYS_PARAM_H */
++
++/* Define to 1 if you have the <sys/resource.h> header file. */
++/* #undef HAVE_SYS_RESOURCE_H */
++
++/* Define to 1 if you have the <sys/stat.h> header file. */
++#define HAVE_SYS_STAT_H 1
++
++/* Define to 1 if you have the <sys/time.h> header file. */
++/* #undef HAVE_SYS_TIME_H */
++
++/* Define to 1 if you have the <sys/types.h> header file. */
++#define HAVE_SYS_TYPES_H 1
++
++/* Define to 1 if you have <sys/wait.h> that is POSIX.1 compatible. */
++/* #undef HAVE_SYS_WAIT_H */
++
++/* Define to 1 if the system has the type `uint64_t'. */
++/* #undef HAVE_UINT64_T */
++
++/* Define to 1 if you have the <unistd.h> header file. */
++#define HAVE_UNISTD_H 1
++
++/* Define to 1 if you have the <utime.h> header file. */
++/* #undef HAVE_UTIME_H */
++
++/* Define to 1 if the system has the type `u_int64_t'. */
++/* #undef HAVE_U_INT64_T */
++
++/* Define to 1 if you have the <windows.h> header file. */
++/* #undef HAVE_WINDOWS_H */
++
++/* Installation directory for binary executables */
++/* #undef LLVM_BINDIR */
++
++/* Time at which LLVM was configured */
++/* #undef LLVM_CONFIGTIME */
++
++/* Installation directory for documentation */
++/* #undef LLVM_DATADIR */
++
++/* Installation directory for config files */
++/* #undef LLVM_ETCDIR */
++
++/* Installation directory for include files */
++/* #undef LLVM_INCLUDEDIR */
++
++/* Installation directory for .info files */
++/* #undef LLVM_INFODIR */
++
++/* Installation directory for libraries */
++/* #undef LLVM_LIBDIR */
++
++/* Installation directory for man pages */
++/* #undef LLVM_MANDIR */
++
++/* Define if this is Unixish platform */
++/* #undef LLVM_ON_UNIX */
++
++/* Define if this is Win32ish platform */
++/* #undef LLVM_ON_WIN32 */
++
++/* Installation prefix directory */
++/* #undef LLVM_PREFIX */
++
++/* Define if the OS needs help to load dependent libraries for dlopen(). */
++/* #undef LTDL_DLOPEN_DEPLIBS */
++
++/* Define to the sub-directory in which libtool stores uninstalled libraries.
++   */
++/* #undef LTDL_OBJDIR */
++
++/* Define to the name of the environment variable that determines the dynamic
++   library search path. */
++/* #undef LTDL_SHLIBPATH_VAR */
++
++/* Define to the extension used for shared libraries, say, ".so". */
++/* #undef LTDL_SHLIB_EXT */
++
++/* Define to the system default library search path. */
++/* #undef LTDL_SYSSEARCHPATH */
++
++/* Define if /dev/zero should be used when mapping RWX memory, or undefine if
++   its not necessary */
++/* #undef NEED_DEV_ZERO_FOR_MMAP */
++
++/* Define if dlsym() requires a leading underscore in symbol names. */
++/* #undef NEED_USCORE */
++
++#if 0
++/* Define to the address where bug reports for this package should be sent. */
++#define PACKAGE_BUGREPORT "llvmbugs@cs.uiuc.edu"
++
++/* Define to the full name of this package. */
++#define PACKAGE_NAME "[Pool Allocation]"
++
++/* Define to the full name and version of this package. */
++#define PACKAGE_STRING "[Pool Allocation] [1.0]"
++
++/* Define to the one symbol short name of this package. */
++#define PACKAGE_TARNAME "--pool-allocation--"
++
++/* Define to the version of this package. */
++#define PACKAGE_VERSION "[1.0]"
++#endif
++
++/* Define as the return type of signal handlers (`int' or `void'). */
++/* #undef RETSIGTYPE */
++
++/* If using the C implementation of alloca, define if you know the
++   direction of stack growth for your system; otherwise it will be
++   automatically deduced at run-time.
++	STACK_DIRECTION > 0 => grows toward higher addresses
++	STACK_DIRECTION < 0 => grows toward lower addresses
++	STACK_DIRECTION = 0 => direction of growth unknown */
++/* #undef STACK_DIRECTION */
++
++/* Define to 1 if the `S_IS*' macros in <sys/stat.h> do not work properly. */
++/* #undef STAT_MACROS_BROKEN */
++
++/* Define to 1 if you have the ANSI C header files. */
++#define STDC_HEADERS 1
++
++/* Define to 1 if you can safely include both <sys/time.h> and <time.h>. */
++/* #undef TIME_WITH_SYS_TIME */
++
++/* Define to 1 if your <sys/time.h> declares `struct tm'. */
++/* #undef TM_IN_SYS_TIME */
++
++/* Define to 1 if `lex' declares `yytext' as a `char *' by default, not a
++   `char[]'. */
++/* #undef YYTEXT_POINTER */
++
++/* Define to empty if `const' does not conform to ANSI C. */
++/* #undef const */
++
++/* Define to a type to use for `error_t' if it is not otherwise available. */
++/* #undef error_t */
++
++/* Define to `int' if <sys/types.h> does not define. */
++/* #undef pid_t */
++
++/* Define to `unsigned' if <sys/types.h> does not define. */
++/* #undef size_t */
++
++/* Define to 1 if compiling for pool inference */
++/* #undef LLVA_KERNEL */
++
+diff --git a/include/poolalloc/PoolAllocate.h b/include/poolalloc/PoolAllocate.h
+index 400063b..6c241b6 100644
+--- a/include/poolalloc/PoolAllocate.h
++++ b/include/poolalloc/PoolAllocate.h
+@@ -22,7 +22,7 @@
+ #include "llvm/IR/DerivedTypes.h"
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/Pass.h"
+-#include "llvm/IR/CallSite.h"
++#include "llvm/Support/CallSite.h"
+ #include "llvm/ADT/EquivalenceClasses.h"
+ #include "llvm/ADT/DenseMap.h"
+ #include "llvm/ADT/DenseSet.h"
+@@ -536,7 +536,7 @@ public:
+   bool runOnModule(Module &M);
+   GlobalVariable *CreateGlobalPool(unsigned RecSize, unsigned Align,
+                                    Module& M);
+-  void ProcessFunctionBodySimple(Function& F, const DataLayout & TD);
++  void ProcessFunctionBodySimple(Function& F, DataLayout & TD);
+ 
+ 
+   virtual DSGraph* getDSGraph (const Function & F) const {
+@@ -568,7 +568,7 @@ public:
+ 
+ // FIXME: Is this used?  Should it be removed?
+ class PoolAllocateMultipleGlobalPool : public PoolAllocate {
+-  void ProcessFunctionBodySimple(Function& F, const DataLayout & TD);
++  void ProcessFunctionBodySimple(Function& F, DataLayout & TD);
+   /// Mapping between DSNodes and Pool descriptors. For this pass, it is a
+   /// one-to-one relationship.
+   typedef DenseMap<const DSNode *, GlobalVariable *> PoolMapTy;
+diff --git a/include/poolalloc/RunTimeAssociate.h b/include/poolalloc/RunTimeAssociate.h
+index aa461d5..9139a38 100644
+--- a/include/poolalloc/RunTimeAssociate.h
++++ b/include/poolalloc/RunTimeAssociate.h
+@@ -21,7 +21,7 @@
+ #include "llvm/IR/DerivedTypes.h"
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/Pass.h"
+-#include "llvm/IR/CallSite.h"
++#include "llvm/Support/CallSite.h"
+ #include "llvm/ADT/EquivalenceClasses.h"
+ #include "llvm/ADT/DenseMap.h"
+ #include "llvm/Support/CommandLine.h"
+diff --git a/include/rdsa/DataStructure.h b/include/rdsa/DataStructure.h
+index 17824fe..71df8df 100644
+--- a/include/rdsa/DataStructure.h
++++ b/include/rdsa/DataStructure.h
+@@ -203,7 +203,7 @@ public:
+   /// getAnalysisUsage - This obviously provides a data structure graph.
+   ///
+   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+-    AU.addRequired<DataLayoutPass>();
++    AU.addRequired<DataLayout>();
+     AU.setPreservesAll();
+   }
+ };
+@@ -427,7 +427,7 @@ public:
+   virtual void releaseMemory();
+ 
+   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+-    AU.addRequired<DataLayoutPass>();
++    AU.addRequired<DataLayout>();
+     AU.addRequired<StdLibDataStructures>();
+     AU.setPreservesAll();
+   }
+diff --git a/lib/AssistDS/ArgCast.cpp b/lib/AssistDS/ArgCast.cpp
+index 8154526..3b931cd 100644
+--- a/lib/AssistDS/ArgCast.cpp
++++ b/lib/AssistDS/ArgCast.cpp
+@@ -56,7 +56,7 @@ bool ArgCast::runOnModule(Module& M) {
+     if (I->mayBeOverridden())
+       continue;
+     // Find all uses of this function
+-    for(Value::user_iterator ui = I->user_begin(), ue = I->user_end(); ui != ue; ) {
++    for(Value::use_iterator ui = I->use_begin(), ue = I->use_end(); ui != ue; ) {
+       // check if is ever casted to a different function type
+       ConstantExpr *CE = dyn_cast<ConstantExpr>(*ui++);
+       if(!CE)
+@@ -78,8 +78,8 @@ bool ArgCast::runOnModule(Module& M) {
+       
+       if(FTy->getNumParams() != I->arg_size() && !FTy->isVarArg())
+         continue;
+-      for(Value::user_iterator uii = CE->user_begin(),
+-          uee = CE->user_end(); uii != uee; ++uii) {
++      for(Value::use_iterator uii = CE->use_begin(),
++          uee = CE->use_end(); uii != uee; ++uii) {
+         // Find all uses of the casted value, and check if it is 
+         // used in a Call Instruction
+         if (CallInst* CI = dyn_cast<CallInst>(*uii)) {
+diff --git a/lib/AssistDS/ArgSimplify.cpp b/lib/AssistDS/ArgSimplify.cpp
+index 26459eb..c11b26d 100644
+--- a/lib/AssistDS/ArgSimplify.cpp
++++ b/lib/AssistDS/ArgSimplify.cpp
+@@ -34,14 +34,14 @@ namespace {
+   static void simplify(Function *F, unsigned arg_count, Type* type) {
+ 
+     // Go through all uses of the function
+-    for(Value::user_iterator ui = F->user_begin(), ue = F->user_end();
++    for(Value::use_iterator ui = F->use_begin(), ue = F->use_end();
+         ui != ue; ++ui) {
+ 
+       if (Constant *C = dyn_cast<Constant>(*ui)) {
+         if (ConstantExpr *CE = dyn_cast<ConstantExpr>(C)) {
+           if (CE->getOpcode() == Instruction::BitCast) {
+             if(CE->getOperand(0) == F) {                    
+-              for(Value::user_iterator uii = CE->user_begin(), uee = CE->user_end();
++              for(Value::use_iterator uii = CE->use_begin(), uee = CE->use_end();
+                   uii != uee; ) {
+                 // check if it is ever used as a call (bitcast F to ...)()
+                 if (CallInst* CI = dyn_cast<CallInst>(*uii++)) {
+@@ -150,7 +150,7 @@ namespace {
+           for (Function::arg_iterator ii = I->arg_begin(), ee = I->arg_end();
+                ii != ee; ++ii) {
+             bool change = true;
+-            for(Value::user_iterator ui = ii->user_begin(), ue = ii->user_end();
++            for(Value::use_iterator ui = ii->use_begin(), ue = ii->use_end();
+                 ui != ue; ++ui) {
+               // check if the argument is used exclusively in ICmp Instructions
+               if(!isa<ICmpInst>(*ui)){
+diff --git a/lib/AssistDS/DSNodeEquivs.cpp b/lib/AssistDS/DSNodeEquivs.cpp
+index 2f01735..b05bc79 100644
+--- a/lib/AssistDS/DSNodeEquivs.cpp
++++ b/lib/AssistDS/DSNodeEquivs.cpp
+@@ -18,7 +18,7 @@
+ 
+ #include "llvm/IR/Constants.h"
+ #include "llvm/IR/Module.h"
+-#include "llvm/IR/InstIterator.h"
++#include "llvm/Support/InstIterator.h"
+ #include "llvm/ADT/SmallSet.h"
+ 
+ #include <deque>
+@@ -247,7 +247,7 @@ const DSNode *DSNodeEquivs::getMemberForValue(const Value *V) {
+     std::deque<const User *> WL;
+     SmallSet<const User *, 8> Visited;
+ 
+-    WL.insert(WL.end(), V->user_begin(), V->user_end());
++    WL.insert(WL.end(), V->use_begin(), V->use_end());
+     do {
+       const User *TheUser = WL.front();
+       WL.pop_front();
+@@ -273,7 +273,7 @@ const DSNode *DSNodeEquivs::getMemberForValue(const Value *V) {
+         //
+         // If this use is of some other nature, look at the users of this use.
+         //
+-        WL.insert(WL.end(), TheUser->user_begin(), TheUser->user_end());
++        WL.insert(WL.end(), TheUser->use_begin(), TheUser->use_end());
+       }
+     } while (!WL.empty());
+   }
+diff --git a/lib/AssistDS/DataStructureCallGraph.cpp b/lib/AssistDS/DataStructureCallGraph.cpp
+index e69de29..be75f0a 100644
+--- a/lib/AssistDS/DataStructureCallGraph.cpp
++++ b/lib/AssistDS/DataStructureCallGraph.cpp
+@@ -0,0 +1,126 @@
++//===- DataStructureCallGraph.cpp - Provide a CallGraph using DSA ---------===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This file contains the DataStructureCallGraph implementation of the
++// CallGraph analysis. Based on llvm/lib/Analysis/IPA/CallGraph.cpp.
++//
++//===----------------------------------------------------------------------===//
++
++#include "assistDS/DataStructureCallGraph.h"
++#include "dsa/DSGraph.h"
++#include "dsa/DSNode.h"
++
++#include "llvm/ADT/SmallPtrSet.h"
++#include "llvm/IR/Instructions.h"
++#include "llvm/IR/IntrinsicInst.h"
++#include "llvm/Support/CallSite.h"
++#include "llvm/Support/InstIterator.h"
++
++using namespace llvm;
++
++char DataStructureCallGraph::ID;
++
++namespace {
++
++static RegisterPass<DataStructureCallGraph>
++X("dsa-cg", "DSA-based CallGraph implementation");
++
++RegisterAnalysisGroup<CallGraph> Y(X); 
++
++}
++
++bool DataStructureCallGraph::runOnModule(Module &M) {
++
++  ExternalCallingNode = getOrInsertFunction(0);
++  CallsExternalNode = new CallGraphNode(0);
++  Root = 0;
++
++  // Add every function to the call graph.
++  for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I)
++    addToCallGraph(I);
++
++  // If we didn't find a main function, use the external call graph node
++  if (Root == 0) Root = ExternalCallingNode;
++  
++  return false;
++}
++
++// Add a function to the call graph, and link the node to all of the functions
++// that it calls.
++void DataStructureCallGraph::addToCallGraph(Function *F) {
++  CallGraphNode *Node = getOrInsertFunction(F);
++
++  if (!F->hasLocalLinkage()) {
++    ExternalCallingNode->addCalledFunction(CallSite(), Node);
++
++    // Found the entry point?
++    if (F->getName() == "main") {
++      if (Root)    // Found multiple external mains?  Don't pick one.
++        Root = ExternalCallingNode;
++      else
++        Root = Node; // Found a main, keep track of it!
++    }
++  }
++
++  // If this function is not defined in this translation unit, it could call
++  // anything.
++  if (F->isDeclaration() && !F->isIntrinsic()) {
++    Node->addCalledFunction(CallSite(), CallsExternalNode);
++    return;
++  }
++
++  TDDataStructures &DS = getAnalysis<TDDataStructures>();
++  DSGraph &GG = *DS.getGlobalsGraph();
++  CallTargetFinderTy &CTF = getAnalysis<CallTargetFinderTy>();
++
++  // Determine if the function can be called by external code by looking up
++  // its DSNode in the globals graph. A node marked External, Unknown, or
++  // Incomplete has the possibility of being called from external code.
++  DSNode *N = GG.getNodeForValue(F).getNode();
++
++  if (N &&
++      (N->isExternalNode() ||
++       N->isUnknownNode() ||
++       N->isIncompleteNode())) {
++    ExternalCallingNode->addCalledFunction(CallSite(), Node);
++  }
++
++  // Go over the instructions in the function and determine the call targets
++  // for each call site.
++  for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
++    CallSite CS(&*I);
++
++    // Only look through valid call sites that are not calls to intrinsics.
++    if (!CS || isa<IntrinsicInst>(&*I))
++      continue;
++
++    if (const Function *F = 
++        dyn_cast<Function>(CS.getCalledValue()->stripPointerCasts())) {
++      // Direct call: Don't use DSA, just add the function we discovered as
++      // the call target.
++
++      Node->addCalledFunction(CS, getOrInsertFunction(F));
++    } else {
++      // Indirect call: Use CallTargetFinder to determine the set of targets to
++      // the indirect call site. Be conservative about incomplete call sites.
++
++      if (!CTF.isComplete(CS)) {
++        // Add CallsExternalNode as a target of incomplete call sites.
++        Node->addCalledFunction(CS, CallsExternalNode);
++      }
++
++      SmallPtrSet<const Function *, 16> Targets(CTF.begin(CS), CTF.end(CS));
++
++      for (SmallPtrSet<const Function *, 16>::const_iterator
++           TI = Targets.begin(), TE = Targets.end(); TI != TE; ++TI) {
++        Node->addCalledFunction(CS, getOrInsertFunction(*TI));
++      }
++    }
++  }
++}
+diff --git a/lib/AssistDS/Devirt.cpp b/lib/AssistDS/Devirt.cpp
+index b861a8f..4a860a2 100644
+--- a/lib/AssistDS/Devirt.cpp
++++ b/lib/AssistDS/Devirt.cpp
+@@ -399,7 +399,7 @@ Devirtualize::runOnModule (Module & M) {
+   // Get information on the target system.
+   //
+   //
+-  TD = &getAnalysis<DataLayoutPass>().getDataLayout();
++  TD = &getAnalysis<DataLayout>();
+ 
+   // Visit all of the call instructions in this function and record those that
+   // are indirect function calls.
+diff --git a/lib/AssistDS/DynCount.cpp b/lib/AssistDS/DynCount.cpp
+index bdcac72..c0e9d03 100644
+--- a/lib/AssistDS/DynCount.cpp
++++ b/lib/AssistDS/DynCount.cpp
+@@ -34,7 +34,7 @@ public:
+   }
+   virtual bool runOnModule (Module & M);
+   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+-    AU.addRequired<DataLayoutPass>();
++    AU.addRequired<DataLayout>();
+     AU.addRequired<dsa::TypeSafety<TDDataStructures> >();
+   }
+ };
+diff --git a/lib/AssistDS/FuncSpec.cpp b/lib/AssistDS/FuncSpec.cpp
+index 2d6b4bd..8f4077d 100644
+--- a/lib/AssistDS/FuncSpec.cpp
++++ b/lib/AssistDS/FuncSpec.cpp
+@@ -69,7 +69,7 @@ bool FuncSpec::runOnModule(Module& M) {
+         } 
+       }
+       // Now find all call sites that it is called from
+-      for(Value::user_iterator ui = I->user_begin(), ue = I->user_end();
++      for(Value::use_iterator ui = I->use_begin(), ue = I->use_end();
+           ui != ue; ++ui) {
+         if (CallInst* CI = dyn_cast<CallInst>(*ui)) {
+           // Check that it is the called value (and not an argument)
+diff --git a/lib/AssistDS/GEPExprArgs.cpp b/lib/AssistDS/GEPExprArgs.cpp
+index 5a65e7a..13bd4b9 100644
+--- a/lib/AssistDS/GEPExprArgs.cpp
++++ b/lib/AssistDS/GEPExprArgs.cpp
+@@ -16,10 +16,10 @@
+ #include "llvm/IR/Constants.h"
+ #include "llvm/IR/Operator.h"
+ #include "llvm/IR/Use.h"
+-#include "llvm/IR/GetElementPtrTypeIterator.h"
++#include "llvm/Support/GetElementPtrTypeIterator.h"
+ #include "llvm/Transforms/Utils/Cloning.h"
+ #include "llvm/ADT/Statistic.h"
+-#include "llvm/IR/ValueMap.h"
++#include "llvm/ADT/ValueMap.h"
+ #include "llvm/Support/FormattedStream.h"
+ #include "llvm/Support/Debug.h"
+ #include <vector>
+diff --git a/lib/AssistDS/IndCloner.cpp b/lib/AssistDS/IndCloner.cpp
+index 2618385..eab32df 100644
+--- a/lib/AssistDS/IndCloner.cpp
++++ b/lib/AssistDS/IndCloner.cpp
+@@ -71,7 +71,7 @@ IndClone::runOnModule(Module& M) {
+     // function by the linker.
+     //
+     if (!I->isDeclaration() && !I->mayBeOverridden()) {
+-      for (Value::user_iterator ui = I->user_begin(), ue = I->user_end();
++      for (Value::use_iterator ui = I->use_begin(), ue = I->use_end();
+           ui != ue; ++ui) {
+         if (!isa<CallInst>(*ui) && !isa<InvokeInst>(*ui)) {
+           if(!ui->use_empty())
+@@ -146,8 +146,8 @@ IndClone::runOnModule(Module& M) {
+     // Find all uses of the function that use it as a direct call.  Change
+     // them to use the clone.
+     //
+-    for (Value::user_iterator ui = Original->user_begin(),
+-                             ue = Original->user_end();
++    for (Value::use_iterator ui = Original->use_begin(),
++                             ue = Original->use_end();
+         ui != ue; ) {
+       CallInst *CI = dyn_cast<CallInst>(*ui);
+       ui++;
+diff --git a/lib/AssistDS/Int2PtrCmp.cpp b/lib/AssistDS/Int2PtrCmp.cpp
+index 7242f12..f6cd44d 100644
+--- a/lib/AssistDS/Int2PtrCmp.cpp
++++ b/lib/AssistDS/Int2PtrCmp.cpp
+@@ -18,7 +18,7 @@
+ #include "llvm/ADT/Statistic.h"
+ #include "llvm/Support/FormattedStream.h"
+ #include "llvm/Support/Debug.h"
+-#include "llvm/IR/PatternMatch.h"
++#include "llvm/Support/PatternMatch.h"
+ 
+ #include <set>
+ #include <map>
+@@ -45,7 +45,7 @@ using namespace PatternMatch;
+ //  false - The module was not modified.
+ //
+ bool Int2PtrCmp::runOnModule(Module& M) {
+-  TD = &getAnalysis<DataLayoutPass>().getDataLayout();
++  TD = &getAnalysis<DataLayout>();
+   for (Module::iterator F = M.begin(); F != M.end(); ++F) {
+     for (Function::iterator B = F->begin(), FE = F->end(); B != FE; ++B) {      
+       for (BasicBlock::iterator I = B->begin(), BE = B->end(); I != BE;) {
+diff --git a/lib/AssistDS/LoadArgs.cpp b/lib/AssistDS/LoadArgs.cpp
+index 595b82b..4039ec0 100644
+--- a/lib/AssistDS/LoadArgs.cpp
++++ b/lib/AssistDS/LoadArgs.cpp
+@@ -17,10 +17,10 @@
+ #include "assistDS/LoadArgs.h"
+ #include "llvm/IR/Constants.h"
+ #include "llvm/IR/Use.h"
+-#include "llvm/IR/GetElementPtrTypeIterator.h"
++#include "llvm/Support/GetElementPtrTypeIterator.h"
+ #include "llvm/Transforms/Utils/Cloning.h"
+ #include "llvm/ADT/Statistic.h"
+-#include "llvm/IR/ValueMap.h"
++#include "llvm/ADT/ValueMap.h"
+ #include "llvm/Support/FormattedStream.h"
+ #include "llvm/Support/Debug.h"
+ #include <vector>
+diff --git a/lib/AssistDS/MergeGEP.cpp b/lib/AssistDS/MergeGEP.cpp
+index 70739ce..2378a33 100644
+--- a/lib/AssistDS/MergeGEP.cpp
++++ b/lib/AssistDS/MergeGEP.cpp
+@@ -18,7 +18,7 @@
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/IR/Operator.h"
+ #include "llvm/IR/Module.h"
+-#include "llvm/IR/GetElementPtrTypeIterator.h"
++#include "llvm/Support/GetElementPtrTypeIterator.h"
+ #include "llvm/Transforms/Utils/Cloning.h"
+ #include "llvm/ADT/Statistic.h"
+ #include "llvm/Support/FormattedStream.h"
+diff --git a/lib/AssistDS/SimplifyExtractValue.cpp b/lib/AssistDS/SimplifyExtractValue.cpp
+index 5a4eb95..8a62ee5 100644
+--- a/lib/AssistDS/SimplifyExtractValue.cpp
++++ b/lib/AssistDS/SimplifyExtractValue.cpp
+@@ -20,7 +20,7 @@
+ #include "llvm/ADT/ArrayRef.h"
+ #include "llvm/Support/FormattedStream.h"
+ #include "llvm/Support/Debug.h"
+-#include "llvm/IR/PatternMatch.h"
++#include "llvm/Support/PatternMatch.h"
+ #include "llvm/IR/DataLayout.h"
+ 
+ #include <set>
+diff --git a/lib/AssistDS/SimplifyGEP.cpp b/lib/AssistDS/SimplifyGEP.cpp
+index 7aa3bf2..08257ba 100644
+--- a/lib/AssistDS/SimplifyGEP.cpp
++++ b/lib/AssistDS/SimplifyGEP.cpp
+@@ -15,7 +15,7 @@
+ #define DEBUG_TYPE "simplify-gep"
+ 
+ #include "assistDS/SimplifyGEP.h"
+-#include "llvm/IR/GetElementPtrTypeIterator.h"
++#include "llvm/Support/GetElementPtrTypeIterator.h"
+ #include "llvm/Support/FormattedStream.h"
+ #include "llvm/Support/Debug.h"
+ #include "llvm/IR/Constants.h"
+@@ -75,7 +75,7 @@ static void preprocess(Module& M) {
+ //  false - The module was not modified.
+ //
+ bool SimplifyGEP::runOnModule(Module& M) {
+-  TD = &getAnalysis<DataLayoutPass>().getDataLayout();
++  TD = &getAnalysis<DataLayout>();
+   preprocess(M);
+   for (Module::iterator F = M.begin(); F != M.end(); ++F){
+     for (Function::iterator B = F->begin(), FE = F->end(); B != FE; ++B) {      
+diff --git a/lib/AssistDS/SimplifyInsertValue.cpp b/lib/AssistDS/SimplifyInsertValue.cpp
+index d495721..9944cd0 100644
+--- a/lib/AssistDS/SimplifyInsertValue.cpp
++++ b/lib/AssistDS/SimplifyInsertValue.cpp
+@@ -18,7 +18,7 @@
+ #include "llvm/ADT/Statistic.h"
+ #include "llvm/Support/FormattedStream.h"
+ #include "llvm/Support/Debug.h"
+-#include "llvm/IR/PatternMatch.h"
++#include "llvm/Support/PatternMatch.h"
+ #include "llvm/IR/DataLayout.h"
+ 
+ #include <set>
+@@ -63,7 +63,7 @@ bool SimplifyIV::runOnModule(Module& M) {
+           if(!IV->hasOneUse())
+             continue;
+           // Check that its only use is a StoreInst
+-          StoreInst *SI = dyn_cast<StoreInst>(*(IV->user_begin()));
++          StoreInst *SI = dyn_cast<StoreInst>(*(IV->use_begin()));
+           if(!SI)
+             continue;
+           // Check that it is the stored value
+diff --git a/lib/AssistDS/SimplifyLoad.cpp b/lib/AssistDS/SimplifyLoad.cpp
+index 9ed26b1..df01be8 100644
+--- a/lib/AssistDS/SimplifyLoad.cpp
++++ b/lib/AssistDS/SimplifyLoad.cpp
+@@ -16,7 +16,7 @@
+ #include "llvm/ADT/Statistic.h"
+ #include "llvm/Support/FormattedStream.h"
+ #include "llvm/Support/Debug.h"
+-#include "llvm/IR/PatternMatch.h"
++#include "llvm/Support/PatternMatch.h"
+ #include "llvm/IR/DataLayout.h"
+ 
+ #include <set>
+@@ -57,7 +57,7 @@ bool SimplifyLoad::runOnModule(Module& M) {
+           if(!LI)
+             continue;
+           if(LI->hasOneUse()) {
+-            if(CastInst *CI = dyn_cast<CastInst>(*(LI->user_begin()))) {
++            if(CastInst *CI = dyn_cast<CastInst>(*(LI->use_begin()))) {
+               if(LI->getType()->isPointerTy()) {
+                 if(ConstantExpr *CE = dyn_cast<ConstantExpr>(LI->getOperand(0))) {
+                   if(const PointerType *PTy = dyn_cast<PointerType>(CE->getOperand(0)->getType()))
+diff --git a/lib/AssistDS/StructReturnToPointer.cpp b/lib/AssistDS/StructReturnToPointer.cpp
+index 05dc694..08f532d 100644
+--- a/lib/AssistDS/StructReturnToPointer.cpp
++++ b/lib/AssistDS/StructReturnToPointer.cpp
+@@ -17,7 +17,7 @@
+ #include "llvm/IR/Attributes.h"
+ #include "llvm/Transforms/Utils/Cloning.h"
+ #include "llvm/ADT/Statistic.h"
+-#include "llvm/IR/ValueMap.h"
++#include "llvm/ADT/ValueMap.h"
+ #include "llvm/Support/FormattedStream.h"
+ #include "llvm/Support/Debug.h"
+ 
+@@ -108,7 +108,7 @@ bool StructRet::runOnModule(Module& M) {
+       }
+     }
+ 
+-    for(Value::user_iterator ui = F->user_begin(), ue = F->user_end();
++    for(Value::use_iterator ui = F->use_begin(), ue = F->use_end();
+         ui != ue; ) {
+       CallInst *CI = dyn_cast<CallInst>(*ui++);
+       if(!CI)
+diff --git a/lib/AssistDS/TypeChecks.cpp b/lib/AssistDS/TypeChecks.cpp
+index 556df5d..e878035 100644
+--- a/lib/AssistDS/TypeChecks.cpp
++++ b/lib/AssistDS/TypeChecks.cpp
+@@ -19,7 +19,7 @@
+ #include "llvm/IR/DerivedTypes.h"
+ #include "llvm/IR/Module.h"
+ #include "llvm/Support/Debug.h"
+-#include "llvm/IR/InstIterator.h"
++#include "llvm/Support/InstIterator.h"
+ #include "llvm/Support/raw_ostream.h"
+ #include "llvm/IR/Intrinsics.h"
+ #include "llvm/Support/CommandLine.h"
+@@ -153,7 +153,7 @@ bool TypeChecks::runOnModule(Module &M) {
+   bool modified = false; // Flags whether we modified the module.
+   bool transformIndirectCalls = true;
+ 
+-  TD = &getAnalysis<DataLayoutPass>().getDataLayout();
++  TD = &getAnalysis<DataLayout>();
+   addrAnalysis = &getAnalysis<AddressTakenAnalysis>();
+ 
+   // Create the necessary prototypes
+@@ -258,7 +258,7 @@ bool TypeChecks::runOnModule(Module &M) {
+     Function &F = *MI;
+     if(F.isDeclaration())
+       continue;
+-    DominatorTree & DT = getAnalysis<DominatorTreeWrapperPass>(F).getDomTree();
++    DominatorTree & DT = getAnalysis<DominatorTree>(F);
+     std::deque<DomTreeNode *> Worklist;
+     Worklist.push_back (DT.getRootNode());
+     while(Worklist.size()) {
+@@ -322,8 +322,8 @@ bool TypeChecks::runOnModule(Module &M) {
+     Constant *CNew = ConstantExpr::getBitCast(FI->second, F->getType());
+ 
+     std::set<User *> toReplace;
+-    for(Function::user_iterator User = F->user_begin();
+-        User != F->user_end();++User) {
++    for(Function::use_iterator User = F->use_begin();
++        User != F->use_end();++User) {
+       toReplace.insert(*User);
+     }
+     for(std::set<llvm::User *>::iterator userI = toReplace.begin(); userI != toReplace.end(); ++userI) {
+@@ -331,8 +331,8 @@ bool TypeChecks::runOnModule(Module &M) {
+       if(Constant *C = dyn_cast<Constant>(user)) {
+         if(!isa<GlobalValue>(C)) {
+           bool changeUse = true;
+-          for(Value::user_iterator II = user->user_begin();
+-              II != user->user_end(); II++) {
++          for(Value::use_iterator II = user->use_begin();
++              II != user->use_end(); II++) {
+             if(CallInst *CI = dyn_cast<CallInst>(*II))
+               if(CI->getCalledFunction()) {
+                 if(CI->getCalledFunction()->isDeclaration())
+@@ -507,7 +507,7 @@ void TypeChecks::optimizeChecks(Module &M) {
+     Function &F = *MI;
+     if(F.isDeclaration())
+       continue;
+-    DominatorTree & DT = getAnalysis<DominatorTreeWrapperPass>(F).getDomTree();
++    DominatorTree & DT = getAnalysis<DominatorTree>(F);
+     std::deque<DomTreeNode *> Worklist;
+     Worklist.push_back (DT.getRootNode());
+     while(Worklist.size()) {
+@@ -521,7 +521,7 @@ void TypeChecks::optimizeChecks(Module &M) {
+         if(CI->getCalledFunction() != checkTypeInst)
+           continue;
+         std::list<Instruction *>toDelete;
+-        for(Value::user_iterator User = CI->getOperand(3)->user_begin(); User != CI->getOperand(3)->user_end(); ++User) {
++        for(Value::use_iterator User = CI->getOperand(3)->use_begin(); User != CI->getOperand(3)->use_end(); ++User) {
+           CallInst *CI2 = dyn_cast<CallInst>(*User);
+           if(!CI2)
+             continue;
+@@ -551,7 +551,7 @@ void TypeChecks::optimizeChecks(Module &M) {
+     Function &F = *MI;
+     if(F.isDeclaration())
+       continue;
+-    DominatorTree & DT = getAnalysis<DominatorTreeWrapperPass>(F).getDomTree();
++    DominatorTree & DT = getAnalysis<DominatorTree>(F);
+     LoopInfo & LI = getAnalysis<LoopInfo>(F);
+     std::deque<DomTreeNode *> Worklist;
+     Worklist.push_back (DT.getRootNode());
+@@ -698,7 +698,7 @@ bool TypeChecks::visitAddressTakenFunction(Module &M, Function &F) {
+ 
+   std::vector<Instruction *>toDelete;
+   // Find all uses of the function
+-  for(Value::user_iterator ui = F.user_begin(), ue = F.user_end();
++  for(Value::use_iterator ui = F.use_begin(), ue = F.use_end();
+       ui != ue;++ui)  {
+     if(InvokeInst *II = dyn_cast<InvokeInst>(*ui)) {
+       if(II->getCalledValue()->stripPointerCasts() != &F)
+@@ -928,7 +928,7 @@ bool TypeChecks::visitInternalVarArgFunction(Module &M, Function &F) {
+ 
+   std::vector<Instruction *>toDelete;
+   // Find all uses of the function
+-  for(Value::user_iterator ui = F.user_begin(), ue = F.user_end();
++  for(Value::use_iterator ui = F.use_begin(), ue = F.use_end();
+       ui != ue;ui ++)  {
+ 
+     // Check for call sites
+@@ -1052,7 +1052,7 @@ bool TypeChecks::visitInternalByValFunction(Module &M, Function &F) {
+ 
+   // Update the call sites
+   std::vector<Instruction *>toDelete;
+-  for(Value::user_iterator ui = F.user_begin(), ue = F.user_end();
++  for(Value::use_iterator ui = F.use_begin(), ue = F.use_end();
+       ui != ue; ui++)  {
+     // Check that F is the called value
+     if(InvokeInst *II = dyn_cast<InvokeInst>(*ui)) {
+@@ -2125,7 +2125,7 @@ bool TypeChecks::visitLoadInst(Module &M, LoadInst &LI) {
+ // BCI - ptr
+ // I - instruction whose uses to instrument
+ bool TypeChecks::visitUses(Instruction *I, Instruction *AI, Value *BCI) {
+-  for(Value::user_iterator II = I->user_begin(); II != I->user_end(); ++II) {
++  for(Value::use_iterator II = I->use_begin(); II != I->use_end(); ++II) {
+     if(DisablePtrCmpChecks) {
+       if(isa<CmpInst>(*II)) {
+         if(I->getType()->isPointerTy())
+diff --git a/lib/AssistDS/TypeChecksOpt.cpp b/lib/AssistDS/TypeChecksOpt.cpp
+index 042f3c8..5f66cc5 100644
+--- a/lib/AssistDS/TypeChecksOpt.cpp
++++ b/lib/AssistDS/TypeChecksOpt.cpp
+@@ -19,7 +19,7 @@
+ #include "llvm/IR/DerivedTypes.h"
+ #include "llvm/IR/Module.h"
+ #include "llvm/Support/Debug.h"
+-#include "llvm/IR/InstIterator.h"
++#include "llvm/Support/InstIterator.h"
+ #include "llvm/Support/raw_ostream.h"
+ #include "llvm/IR/Intrinsics.h"
+ #include "llvm/Support/CommandLine.h"
+@@ -137,7 +137,7 @@ bool TypeChecksOpt::runOnModule(Module &M) {
+                                      NULL);
+   MallocFunc = M.getFunction("malloc");
+ 
+-  for(Value::user_iterator User = trackGlobal->user_begin(); User != trackGlobal->user_end(); ++User) {
++  for(Value::use_iterator User = trackGlobal->use_begin(); User != trackGlobal->use_end(); ++User) {
+     CallInst *CI = dyn_cast<CallInst>(*User);
+     assert(CI);
+     if(TS->isTypeSafe(CI->getOperand(1)->stripPointerCasts(), CI->getParent()->getParent())) {
+@@ -150,7 +150,7 @@ bool TypeChecksOpt::runOnModule(Module &M) {
+     }
+   }
+ 
+-  for(Value::user_iterator User = checkTypeInst->user_begin(); User != checkTypeInst->user_end(); ++User) {
++  for(Value::use_iterator User = checkTypeInst->use_begin(); User != checkTypeInst->use_end(); ++User) {
+     CallInst *CI = dyn_cast<CallInst>(*User);
+     assert(CI);
+ 
+@@ -159,7 +159,7 @@ bool TypeChecksOpt::runOnModule(Module &M) {
+     }
+   }
+ 
+-  for(Value::user_iterator User = trackStoreInst->user_begin(); User != trackStoreInst->user_end(); ++User) {
++  for(Value::use_iterator User = trackStoreInst->use_begin(); User != trackStoreInst->use_end(); ++User) {
+     CallInst *CI = dyn_cast<CallInst>(*User);
+     assert(CI);
+ 
+@@ -170,7 +170,7 @@ bool TypeChecksOpt::runOnModule(Module &M) {
+ 
+   // for alloca's if they are type known
+   // assume initialized with TOP
+-  for(Value::user_iterator User = trackUnInitInst->user_begin(); User != trackUnInitInst->user_end(); ) {
++  for(Value::use_iterator User = trackUnInitInst->use_begin(); User != trackUnInitInst->use_end(); ) {
+     CallInst *CI = dyn_cast<CallInst>(*(User++));
+     assert(CI);
+ 
+@@ -191,7 +191,7 @@ bool TypeChecksOpt::runOnModule(Module &M) {
+   }
+ 
+   if(MallocFunc) {
+-    for(Value::user_iterator User = MallocFunc->user_begin(); User != MallocFunc->user_end(); User ++) {
++    for(Value::use_iterator User = MallocFunc->use_begin(); User != MallocFunc->use_end(); User ++) {
+       CallInst *CI = dyn_cast<CallInst>(*User);
+       if(!CI)
+         continue;
+@@ -213,7 +213,7 @@ bool TypeChecksOpt::runOnModule(Module &M) {
+   // also do for mallocs/calloc/other allocators???
+   // other allocators??
+ 
+-  for(Value::user_iterator User = copyTypeInfo->user_begin(); User != copyTypeInfo->user_end(); ++User) {
++  for(Value::use_iterator User = copyTypeInfo->use_begin(); User != copyTypeInfo->use_end(); ++User) {
+     CallInst *CI = dyn_cast<CallInst>(*User);
+     assert(CI);
+ 
+@@ -226,7 +226,7 @@ bool TypeChecksOpt::runOnModule(Module &M) {
+       toDelete.push_back(CI);
+     }
+   }
+-  for(Value::user_iterator User = setTypeInfo->user_begin(); User != setTypeInfo->user_end(); ++User) {
++  for(Value::use_iterator User = setTypeInfo->use_begin(); User != setTypeInfo->use_end(); ++User) {
+     CallInst *CI = dyn_cast<CallInst>(*User);
+     assert(CI);
+ 
+@@ -240,7 +240,7 @@ bool TypeChecksOpt::runOnModule(Module &M) {
+     }
+   }
+ 
+-  for(Value::user_iterator User = getTypeTag->user_begin(); User != getTypeTag->user_end(); ++User) {
++  for(Value::use_iterator User = getTypeTag->use_begin(); User != getTypeTag->use_end(); ++User) {
+     CallInst *CI = dyn_cast<CallInst>(*User);
+     assert(CI);
+     if(TS->isTypeSafe(CI->getOperand(1)->stripPointerCasts(), CI->getParent()->getParent())) {
+diff --git a/lib/DSA/AddressTakenAnalysis.cpp b/lib/DSA/AddressTakenAnalysis.cpp
+index 47e5acd..9615161 100644
+--- a/lib/DSA/AddressTakenAnalysis.cpp
++++ b/lib/DSA/AddressTakenAnalysis.cpp
+@@ -15,7 +15,7 @@
+ //===----------------------------------------------------------------------===//
+ 
+ #include "llvm/Pass.h"
+-#include "llvm/IR/CallSite.h"
++#include "llvm/Support/CallSite.h"
+ #include "llvm/IR/Constants.h"
+ #include "llvm/IR/Module.h"
+ #include "llvm/IR/Function.h"
+@@ -36,7 +36,7 @@ AddressTakenAnalysis::~AddressTakenAnalysis() {}
+ 
+ static bool isAddressTaken(Value* V) {
+   for (Value::use_iterator I = V->use_begin(), E = V->use_end(); I != E; ++I) {
+-    User *U = I->getUser();
++    User *U = *I;
+     if(isa<StoreInst>(U))
+       return true;
+     if (!isa<CallInst>(U) && !isa<InvokeInst>(U)) {
+@@ -60,7 +60,7 @@ static bool isAddressTaken(Value* V) {
+       // are never used
+     } else {
+       llvm::CallSite CS(cast<Instruction>(U));
+-      if (!CS.isCallee(&(*I)))
++      if (!CS.isCallee(I))
+         return true;
+     }
+   }
+diff --git a/lib/DSA/AllocatorIdentification.cpp b/lib/DSA/AllocatorIdentification.cpp
+index 9102f3e..292b950 100644
+--- a/lib/DSA/AllocatorIdentification.cpp
++++ b/lib/DSA/AllocatorIdentification.cpp
+@@ -62,7 +62,7 @@ bool AllocIdentify::flowsFrom(Value *Dest,Value *Src) {
+ 
+ bool isNotStored(Value *V) {
+   // check that V is not stored to a location that is accessible outside this fn
+-  for(Value::user_iterator ui = V->user_begin(), ue = V->user_end();
++  for(Value::use_iterator ui = V->use_begin(), ue = V->use_end();
+       ui != ue; ++ui) {
+     if(isa<StoreInst>(*ui))
+       return false;
+@@ -110,7 +110,7 @@ bool AllocIdentify::runOnModule(Module& M) {
+       Function* F = M.getFunction(*it);
+       if(!F)
+         continue;
+-      for(Value::user_iterator ui = F->user_begin(), ue = F->user_end();
++      for(Value::use_iterator ui = F->use_begin(), ue = F->use_end();
+           ui != ue; ++ui) {
+         // iterate though all calls to malloc
+         if (CallInst* CI = dyn_cast<CallInst>(*ui)) {
+@@ -162,7 +162,7 @@ bool AllocIdentify::runOnModule(Module& M) {
+ 
+       if(!F)
+         continue;
+-      for(Value::user_iterator ui = F->user_begin(), ue = F->user_end();
++      for(Value::use_iterator ui = F->use_begin(), ue = F->use_end();
+           ui != ue; ++ui) {
+         // iterate though all calls to malloc
+         if (CallInst* CI = dyn_cast<CallInst>(*ui)) {
+diff --git a/lib/DSA/Basic.cpp b/lib/DSA/Basic.cpp
+index 6f127f8..7c109f8 100644
+--- a/lib/DSA/Basic.cpp
++++ b/lib/DSA/Basic.cpp
+@@ -15,15 +15,15 @@
+ #include "dsa/DataStructure.h"
+ #include "dsa/DSGraph.h"
+ 
+-#include "llvm/IR/InstVisitor.h"
++#include "llvm/InstVisitor.h"
+ #include "llvm/IR/Constants.h"
+ #include "llvm/IR/DerivedTypes.h"
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/IR/Intrinsics.h"
+ #include "llvm/IR/Module.h"
+ #include "llvm/IR/TypeBuilder.h"
+-#include "llvm/IR/InstIterator.h"
+-#include "llvm/IR/GetElementPtrTypeIterator.h"
++#include "llvm/Support/InstIterator.h"
++#include "llvm/Support/GetElementPtrTypeIterator.h"
+ 
+ using namespace llvm;
+ 
+@@ -33,7 +33,7 @@ X("dsa-basic", "Basic Data Structure Analysis(No Analysis)");
+ char BasicDataStructures::ID = 0;
+ 
+ bool BasicDataStructures::runOnModule(Module &M) {
+-  init(&getAnalysis<DataLayoutPass>().getDataLayout());
++  init(&getAnalysis<DataLayout>());
+ 
+   //
+   // Create a void pointer type.  This is simply a pointer to an 8 bit value.
+diff --git a/lib/DSA/DataStructure.cpp b/lib/DSA/DataStructure.cpp
+index 757c5c3..e2b5667 100644
+--- a/lib/DSA/DataStructure.cpp
++++ b/lib/DSA/DataStructure.cpp
+@@ -354,7 +354,7 @@ void DSNode::markIntPtrFlags() {
+     for (svset<Type*>::const_iterator ni = TyMap[offset]->begin(),
+          ne = TyMap[offset]->end(); ni != ne; ++ni) {
+       if((*ni)->isPointerTy()) {
+-        PointerType * PT = dyn_cast<PointerType>(*ni);
++        const PointerType * PT = dyn_cast<PointerType>(*ni);
+         pointerTy = true;
+         ptrSize = TD.getPointerSize(PT->getAddressSpace());
+       }
+@@ -1497,7 +1497,7 @@ void DataStructures::init(DataStructures* D, bool clone, bool useAuxCalls,
+   if (!clone) D->DSGraphsStolen = true;
+ }
+ 
+-void DataStructures::init(const DataLayout* T) {
++void DataStructures::init(DataLayout* T) {
+   assert (!TD && "Already init");
+   GraphSource = 0;
+   Clone = false;
+diff --git a/lib/DSA/DataStructureAA.cpp b/lib/DSA/DataStructureAA.cpp
+new file mode 100644
+index 0000000..167b400
+--- /dev/null
++++ b/lib/DSA/DataStructureAA.cpp
+@@ -0,0 +1,710 @@
++//===- DataStructureAA.cpp - Data Structure Based Alias Analysis ----------===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file was developed by the LLVM research group and is distributed under
++// the University of Illinois Open Source License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This pass uses the top-down data structure graphs to implement a simple
++// context sensitive alias analysis.
++//
++//===----------------------------------------------------------------------===//
++
++#define DEBUG_TYPE "dsaa"
++
++#include "dsa/DataStructureAA.h"
++#include "llvm/Assembly/Writer.h"
++#include "llvm/Support/CommandLine.h"
++#include "llvm/ADT/Statistic.h"
++
++using namespace llvm;
++
++namespace {
++// Register the pass
++RegisterPass<DSAA> X("ds-aa", "Data Structure Graph Based Alias Analysis");
++
++// Register as an implementation of AliasAnalysis
++RegisterAnalysisGroup<AliasAnalysis> Y(X);
++
++// Command line opts
++cl::opt<bool> ThreadSafeDSAA("ds-aa-thread-safe",
++         cl::desc("Enable thread-safe analysis for DSAA."),
++         cl::Hidden,
++         cl::init(true));
++}
++
++char DSAA::ID;
++
++ModulePass *llvm::createDSAAPass() { return new DSAA(); }
++
++DSAA::DSAA()
++  : ModulePass(ID), TD(NULL), BU(NULL), Steens(NULL), valid(false)
++{}
++
++DSAA::~DSAA() {
++  releaseMemory();
++}
++
++void DSAA::releaseMemory() {
++  valid = false;
++  StdLib = NULL;
++  TD = NULL;
++  BU = NULL;
++  Steens = NULL;
++  invalidateCache();
++}
++
++void DSAA::invalidateCache() {
++  MapCS = CallSite();
++  CallerCalleeMap.clear();
++}
++
++void DSAA::getAnalysisUsage(AnalysisUsage &AU) const {
++  AliasAnalysis::getAnalysisUsage(AU);
++  // Does not transform code
++  AU.setPreservesAll();
++  AU.addRequiredTransitive<SteensgaardDataStructures>();  // for alias
++  AU.addRequiredTransitive<EQTDDataStructures>();         // for alias, getModRefInfo
++  AU.addRequiredTransitive<EquivBUDataStructures>();      // for getModRefInfo
++  AU.addRequiredTransitive<StdLibDataStructures>();       // for getModRefInfo
++}
++
++bool DSAA::runOnModule(Module &M) {
++  InitializeAliasAnalysis(this);
++
++  assert(!valid && "DSAA executed twice without being invalidated?");
++
++  StdLib = &getAnalysis<StdLibDataStructures>();
++  TD = &getAnalysis<EQTDDataStructures>();
++  BU = &getAnalysis<EquivBUDataStructures>();
++  Steens = &getAnalysis<SteensgaardDataStructures>();
++
++  if (ThreadSafeDSAA) {
++    enumerateMemoryBarriers();
++    enumerateEscapingNodes(M);
++  }
++
++  // DEBUG
++  DEBUG(
++    dumpMemoryBarriers(errs());
++    dumpEscapingNodes(errs(), M);
++    errs() << "======== TD Graph =========\n";
++    TD->print(errs(), &M);
++    errs() << "======== Steens Graph =========\n";
++    Steens->print(errs(), &M)
++  );
++
++  valid = true;
++  return false;
++}
++
++// Compute memory barrier functions.
++// Recursive traversal of the call graph, starting at all possible roots.
++void DSAA::enumerateMemoryBarriers() {
++  const DSCallGraph &CG = TD->getCallGraph();
++  DenseSet<const Function*> visited;
++  DenseSet<const Function*> visiting;
++
++  for (DSCallGraph::root_iterator r = CG.root_begin(); r != CG.root_end(); ++r) {
++    visited.clear();
++    if (enumerateMemoryBarriers(CG, *r, &visited))
++      MemoryBarriers.insert(*r);
++  }
++}
++
++bool DSAA::enumerateMemoryBarriers(const DSCallGraph &CG,
++                                   const Function *LeaderF,
++                                   DenseSet<const Function*> *visited) {
++  // Prevent loops
++  if (visited->count(LeaderF))
++    return MemoryBarriers.count(LeaderF) > 0;
++
++  // This can happen for indirect calls
++  // In this case, query StdLibInfo and otherwise be conservative
++  if (LeaderF->isDeclaration()) {
++    const StdLibInfo::LibAction* action =
++          StdLib->getStdLibInfo().getLibActionForFunction(LeaderF);
++    return !action || action->memoryBarrier;
++  }
++
++  // Mark visited now.  Note that this can trigger the above visited->count()
++  // check for recursive calls.  In that case, we'll return `false`, which is
++  // okay because we're still in the process of computing the real answer.
++  visited->insert(LeaderF);
++
++  bool isBarrier = false;
++
++  // Process all call instructions for all functions in this SCC
++  for (DSCallGraph::scc_iterator F = CG.scc_begin(LeaderF),
++                                FE = CG.scc_end(LeaderF); F != FE; ++F) {
++    for (Function::const_iterator BB = F->begin(); BB != F->end(); ++BB) {
++      for (BasicBlock::const_iterator I = BB->begin(); I != BB->end(); ++I) {
++        if (!isa<CallInst>(I) && !isa<InvokeInst>(I))
++          continue;
++        CallSite CS(const_cast<Instruction*>(cast<Instruction>(I)));
++        // Direct call to a memory barrier?
++        const Function* Callee = CS.getCalledFunction();
++        const StdLibInfo::LibAction* action =
++          StdLib->getStdLibInfo().getLibActionForFunction(Callee);
++        if (action) {
++          if (action->memoryBarrier)
++            isBarrier = true;
++          // need to process callsites for threadcreate functions
++          if (action->threadFnArg < 0)
++            continue;
++        }
++        // Direct call to an unknown external function?
++        else if (Callee && Callee->isDeclaration()) {
++          isBarrier = true;
++          continue;
++        }
++        // Incomplete call site?
++        if (!CG.callee_is_complete(CS)) {
++          isBarrier = true;
++          /* no continue here */
++        }
++        // Process all potential call targets
++        for (DSCallGraph::callee_iterator T = CG.callee_begin(CS),
++                                         TE = CG.callee_end(CS); T != TE; ++T) {
++          if (enumerateMemoryBarriers(CG, *T, visited))
++            isBarrier = true;
++        }
++      }
++    }
++  }
++
++  // If this SCC calls a barrier, add all functions in the SCC to the barrier set
++  if (!isBarrier)
++    return false;
++
++  for (DSCallGraph::scc_iterator F = CG.scc_begin(LeaderF),
++                                FE = CG.scc_end(LeaderF); F != FE; ++F) {
++    MemoryBarriers.insert(*F);
++  }
++
++  return true;
++}
++
++void DSAA::dumpMemoryBarriers(raw_ostream &os) {
++  os << "MemoryBarriers: [ ";
++  for (std::set<const Function*>::iterator
++       it = MemoryBarriers.begin(); it != MemoryBarriers.end(); ++it)
++    os << (*it)->getName() << " ";
++  os << "]\n";
++}
++
++// Compute thread-escaping nodes.
++void DSAA::enumerateEscapingNodes(Module &M) {
++  EscapingNodes.clear();
++  DSGraph *G = Steens->getResultGraph();
++	errs() << __func__ << "()\n";
++  //
++  // -- 1 --
++  // All nodes reachable from globals are escaping
++  //
++
++  for (DSGraph::node_const_iterator N = G->node_begin(); N != G->node_end(); ++N) {
++    if (N->isGlobalNode() || N->isUnknownNode())
++      N->markReachableNodes(EscapingNodes);
++  }
++
++  //
++  // -- 2 --
++  // All nodes reachable from a thread creation function are escaping
++  //
++
++  for (Module::const_iterator F = M.begin(); F != M.end(); ++F) {
++    for (Function::const_iterator BB = F->begin(); BB != F->end(); ++BB) {
++      for (BasicBlock::const_iterator I = BB->begin(); I != BB->end(); ++I) {
++        if (!isa<CallInst>(I) && !isa<InvokeInst>(I))
++          continue;
++        CallSite CS(const_cast<Instruction*>(cast<Instruction>(I)));
++        // Direct call to a thread creation function?
++        const Function* Callee = CS.getCalledFunction();
++        const StdLibInfo::LibAction* action =
++          StdLib->getStdLibInfo().getLibActionForFunction(Callee);
++        if (!action || action->threadFnParamArg < 0)
++          continue;
++        const Value *P = CS.getArgument(action->threadFnParamArg);
++        DSGraph::ScalarMapTy::const_iterator N = G->getScalarMap().find(P);
++        if (N == G->getScalarMap().end())
++          continue;
++        N->second.getNode()->markReachableNodes(EscapingNodes);
++      }
++    }
++  }
++
++  //
++  // -- 3 --
++  // All nodes reachable from the arguments or return values of external
++  // functions are escaping.  Note that this is already computed by the
++  // `External` flag of a node, so we do not need to do anything here.
++  //
++}
++
++void DSAA::dumpEscapingNodes(raw_ostream &os, Module &M) {
++  DSGraph *G = Steens->getResultGraph();
++  EquivalenceClasses<const GlobalValue*>& GlobalECs = G->getGlobalECs();
++
++  os << "EscapingNodes: [\n";
++  for (DenseSet<const DSNode*>::iterator
++       N = EscapingNodes.begin(); N != EscapingNodes.end(); ++N) {
++    for (DSNode::globals_iterator I = (*N)->globals_begin(); I != (*N)->globals_end(); ++I) {
++      os << "  ";
++      WriteAsOperand(os, *I, false, &M);
++      EquivalenceClasses<const GlobalValue*>::iterator E = GlobalECs.findValue(*I);
++      if (E != GlobalECs.end()) {
++        unsigned members = std::distance(GlobalECs.member_begin(E), GlobalECs.member_end());
++        if (members != 1) os << " + " << (members-1) << " EC";
++      }
++    }
++    os << "\n";
++  }
++  os << "]\n";
++}
++
++STATISTIC(ext,  "esc: (1) external node");
++STATISTIC(eic,  "esc: (2) inc node");
++STATISTIC(een,  "esc: (3) escaping node");
++STATISTIC(oeen, "esc: (4) only escaping node");
++
++#include <stdio.h>
++bool DSAA::mightValueEscapeThread(const Value *V) {
++  DSGraph *G = Steens->getResultGraph();
++
++  const DSGraph::ScalarMapTy &GSM = G->getScalarMap();
++  DSGraph::ScalarMapTy::const_iterator I = GSM.find(V);
++  if (I == GSM.end())
++    return false;
++  // Is the node escaping?
++  // Need to check if this node is external (see comment in enumerateEscapingNodes)
++  DSNode *N = I->second.getNode();
++  if ( N->isExternalNode() || N->isIncompleteNode() || EscapingNodes.count(N) > 0) {
++  	if ( N->isExternalNode() )   ext++;
++  	if ( N->isIncompleteNode() ) eic++;
++  	if ( EscapingNodes.count(N) > 0 ) een++;
++  	if ( EscapingNodes.count(N) > 0 && !(N->isIncompleteNode()||N->isExternalNode())) oeen++;
++	
++    return true;
++
++	}
++  return false;
++}
++
++// Return the DSGraph for the function the Value appears in, or NULL
++// if the value was not defined in a function.
++static const Function*
++getFunctionForValue(const Value *V) {
++  if (const Instruction *I = dyn_cast<Instruction>(V))
++    return I->getParent()->getParent();
++  else if (const Argument *A = dyn_cast<Argument>(V))
++    return A->getParent();
++  else if (const BasicBlock *BB = dyn_cast<BasicBlock>(V))
++    return BB->getParent();
++  return NULL;
++}
++
++DSGraph*
++DSAA::getFunctionGraphForValue(const Value *V) {
++  const Function *F = getFunctionForValue(V);
++  if (F) return TD->getDSGraph(*F);
++  return NULL;
++}
++
++// Do the locations alias?
++AliasAnalysis::AliasResult
++DSAA::alias(const Location &Loc1, const Location &Loc2) {
++  assert(valid && "DSAA invalidated but then queried?!");
++
++  const Value *V1 = Loc1.Ptr;
++  const Value *V2 = Loc2.Ptr;
++  uint64_t V1Size = Loc1.Size;
++  uint64_t V2Size = Loc2.Size;
++
++  if (V1 == V2)
++    return MustAlias;
++
++  if (!V1 || !V2)
++    return AliasAnalysis::alias(Loc1, Loc2);
++
++  DEBUG(errs() << "Alias for: " << *V1 << " " << *V2 << "\n");
++
++  // Decide on a common graph to use
++  DSGraph *G1 = getFunctionGraphForValue(V1);
++  DSGraph *G2 = getFunctionGraphForValue(V2);
++  DSGraph *G = NULL;
++
++  // If G1=null then V1 is a GlobalValue
++  // In this case use G2 if it exists, otherwise fall back on the globals graph
++  if (!G1 || !G2) {
++    G = G1 ? G1 : (G2 ? G2 : TD->getGlobalsGraph());
++  }
++
++  // If the graphs differ then values come from different functions, so fall
++  // back on the global Steensgaard graph
++  else if (G1 != G2) {
++    G = Steens->getResultGraph();
++  }
++
++  // Otherwise the graphs are the same and non-null
++  else {
++    G = G1;
++  }
++
++  const DSGraph::ScalarMapTy &GSM = G->getScalarMap();
++  DSGraph::ScalarMapTy::const_iterator I = GSM.find(V1);
++  if (I == GSM.end()) return NoAlias;
++
++  DSGraph::ScalarMapTy::const_iterator J = GSM.find(V2);
++  if (J == GSM.end()) return NoAlias;
++
++  DSNode  *N1 = I->second.getNode(),  *N2 = J->second.getNode();
++  unsigned O1 = I->second.getOffset(), O2 = J->second.getOffset();
++
++  // Can't tell whether anything aliases null
++  if (N1 == NULL || N2 == NULL)
++    goto unknown;
++
++  // We can make a further judgment only if one of the nodes is complete
++  if ((N1->isCompleteNode() && !N1->isExternalNode()) ||
++      (N2->isCompleteNode() && !N2->isExternalNode())) {
++    // Different nodes don't alias
++    if (N1 != N2)
++      return NoAlias;
++
++    // Non-overlapping fields don't alias
++    if (O1 != O2) {
++      if (O2 < O1) {    // Ensure that O1 <= O2
++        std::swap(V1, V2);
++        std::swap(O1, O2);
++        std::swap(V1Size, V2Size);
++      }
++
++      if (O1+V1Size <= O2)
++        return NoAlias;
++    }
++  }
++
++unknown:
++  // Other alias analyses cannot handle values from different functions.
++  // Preempt assertion failures in that case (see, e.g., BasicAliasAnalysis).
++  // Note that we can't do the separate-function comparison with G1 and G2,
++  // because these may be the same for different functions in the same SCC.
++  const Function *F1 = getFunctionForValue(V1);
++  const Function *F2 = getFunctionForValue(V2);
++  if (F1 && F2 && F1 != F2)
++    return MayAlias;
++
++  // Defer to chain
++  return AliasAnalysis::alias(Loc1, Loc2);
++}
++
++// Does a callsite modify or reference a value?
++AliasAnalysis::ModRefResult
++DSAA::getModRefInfo(ImmutableCallSite CS, const Location &Loc) {
++  assert(valid && "DSAA invalidated but then queried?!");
++
++  if (!Loc.Ptr)
++    return AliasAnalysis::getModRefInfo(CS, Loc);
++
++  std::pair<bool, ModRefResult> res;
++
++  //
++  // Try to resolve the call target directly
++  //
++  const Function *F = CS.getCalledFunction();
++  if (F) {
++    DEBUG(errs() << "GetModRefInfo directcall: "
++                 << F->getName() << " " << *Loc.Ptr << "\n");
++
++    res = getModRefInfoForCallee(CS, Loc, F);
++
++    DEBUG(errs() << "                            <"
++                 << res.first << " , " << res.second << ">\n");
++
++    if (res.first)
++      return res.second;
++    else
++      return mergeChainedModRefInfo(CS, Loc, res.second);
++  }
++
++  //
++  // Otherwise, query DSA for all possible call targets
++  //
++  DSGraph *G = getFunctionGraphForValue(Loc.Ptr);
++  if (!G)
++    G = TD->getGlobalsGraph();
++
++  const DSGraph::ScalarMapTy &GSM = G->getScalarMap();
++  DSGraph::ScalarMapTy::const_iterator nodeIt = GSM.find(CS.getCalledValue());
++  if (nodeIt == GSM.end())
++    return mergeChainedModRefInfo(CS, Loc, ModRef);
++
++  std::vector<const Function*> targets;
++  nodeIt->second.getNode()->addFullFunctionList(targets);
++  if (targets.empty())
++    return mergeChainedModRefInfo(CS, Loc, ModRef);
++
++  // Combine the ModRefInfo for all possible targets
++  bool precise = true;
++  unsigned preciseinfo = NoModRef;  // we cannot be more precise than this
++  unsigned mayinfo     = NoModRef;  // conservative may-info (we will OR-in as we go)
++
++  for (size_t i = 0; i < targets.size(); ++i) {
++    F = targets[i];
++
++    DEBUG(errs() << "GetModRefInfo indirectcall: "
++                 << F->getName() << " " << *Loc.Ptr << "\n");
++
++    res = getModRefInfoForCallee(CS, Loc, F);
++
++    DEBUG(errs() << "                            <"
++                 << res.first << " , " << res.second << ">\n");
++
++    if (res.first) {
++      preciseinfo |= res.second;
++      if (preciseinfo == ModRef)
++        return ModRef;
++    }
++    mayinfo |= res.second;
++    if (!res.first)
++      precise = false;
++  }
++
++  if (precise) {
++    assert(preciseinfo == mayinfo);
++    return (ModRefResult)preciseinfo;
++  }
++
++  // Maybe a chained analysis can be more precise
++  return mergeChainedModRefInfo(CS, Loc, (ModRefResult)mayinfo);
++}
++
++//
++// At this point, the absence of bits in `mayinfo` represents proven info.
++// For example, if mayinfo=Ref, then we have proven that none of the targets
++// can modify Loc.  However, we were not completely precise, so we should
++// check if a chained AliasAnalysis::getModRefInfo can remove more bits
++// from mayinfo.
++//
++AliasAnalysis::ModRefResult
++DSAA::mergeChainedModRefInfo(ImmutableCallSite CS, const Location &Loc,
++                             ModRefResult mayinfo) {
++  if (mayinfo == NoModRef)
++    return NoModRef;
++
++  // Other alias analyses cannot handle values from different functions
++  // Preempt assertion failures in that case (see, e.g., BasicAliasAnalysis)
++  const Function *F = getFunctionForValue(Loc.Ptr);
++  if (F && F != CS.getCaller())
++    return (ModRefResult)mayinfo;
++
++  mayinfo = ModRefResult(mayinfo & AliasAnalysis::getModRefInfo(CS, Loc));
++  return mayinfo;
++}
++
++//
++// Does a callsite modify or reference a value?  In this version, we are
++// given a specific known (possible) callee, and we return a pair:
++//
++//   first: true iff we have precise ModRef info
++//          false if we should query a chained analysis for more info
++//
++//   second: the ModRefResult
++//
++std::pair<bool, AliasAnalysis::ModRefResult>
++DSAA::getModRefInfoForCallee(ImmutableCallSite CS, const Location &Loc,
++                             const Function *F) {
++  assert(valid && "DSAA invalidated but then queried?!");
++  assert(F);
++
++  const Value *P = Loc.Ptr;
++  const uint64_t Size = Loc.Size;
++
++  // Cannot optimize across memory barriers, unless the value doesn't escape
++  // TODO: we can probably optimize this further for Acquire vs Release fences
++  if (ThreadSafeDSAA) {
++    if (MemoryBarriers.count(F) > 0 && mightValueEscapeThread(P))
++      return std::make_pair(true, ModRef);
++  }
++
++  DSNode *N = NULL;
++  // First step, check our cache.
++  if (CS.getInstruction() == MapCS.getInstruction()) {
++    DEBUG(errs() << "  ... cached\n");
++    {
++      const Function *Caller = CS.getCaller();
++      DSGraph* CallerTDGraph = TD->getDSGraph(*Caller);
++
++      // Figure out which node in the TD graph this pointer corresponds to.
++      DSScalarMap &CallerSM = CallerTDGraph->getScalarMap();
++      DSScalarMap::iterator NI = CallerSM.find(P);
++      if (NI == CallerSM.end()) {
++        invalidateCache();
++        return DSAA::getModRefInfoForCallee(CS, Loc, F);
++      }
++      N = NI->second.getNode();
++    }
++
++  HaveMappingInfo:
++    assert(N && "Null pointer in scalar map??");
++
++    typedef std::multimap<DSNode*, const DSNode*>::iterator NodeMapIt;
++    std::pair<NodeMapIt, NodeMapIt> Range = CallerCalleeMap.equal_range(N);
++
++    // Loop over all of the nodes in the callee that correspond to "N", keeping
++    // track of aggregate mod/ref info.
++    bool NeverReads = true, NeverWrites = true;
++    for (; Range.first != Range.second; ++Range.first) {
++      if (Range.first->second->isModifiedNode())
++        NeverWrites = false;
++      if (Range.first->second->isReadNode())
++        NeverReads = false;
++      if (NeverReads == false && NeverWrites == false)
++        return std::make_pair(false, ModRef);
++    }
++
++    ModRefResult Result = ModRef;
++    if (NeverWrites)      // We proved it was not modified.
++      Result = ModRefResult(Result & ~Mod);
++    if (NeverReads)       // We proved it was not read.
++      Result = ModRefResult(Result & ~Ref);
++
++    if (Result == NoModRef)
++      return std::make_pair(true, NoModRef);
++
++    // Maybe a further AliasAnalysis can be more precise
++    return std::make_pair(false, Result);
++  }
++
++  // Any cached info we have is for the wrong function.
++  invalidateCache();
++
++  if (F->isDeclaration()) {
++    const bool escapes  = ThreadSafeDSAA ? mightValueEscapeThread(P) : false;
++
++    //
++    // First check if this is a known external function
++    //
++    const StdLibInfo::LibAction *action =
++      StdLib->getStdLibInfo().getLibActionForFunction(F);
++
++    if (action) {
++      // Cannot optimize across memory barriers.  Note that `MemoryBarriers`
++      // only includes functions with definitions, hence this check is not
++      // redundant with the one above.
++      if (ThreadSafeDSAA && action->memoryBarrier && escapes)
++        return std::make_pair(true, ModRef);
++
++      unsigned res = NoModRef;
++
++      // For each arg (including the return value), check if the ptr
++      // aliases that arg.  If it does, merge the mod/ref info for that
++      // arg into the result.
++      for (unsigned y = 0; y < CS.arg_size()+1; ++y) {
++        if (!action->read[y] && !action->write[y])
++          continue;
++        const Value *a = (y == 0) ? CS.getInstruction() : CS.getArgument(y-1);
++        if (isa<PointerType>(a->getType()) && alias(Loc, Location(a,Size)) != NoAlias) {
++          if (action->read[y])
++            res = Ref;
++          if (action->write[y])
++            res |= Mod;
++          if (res == ModRef)
++            break;
++        }
++      }
++
++      return std::make_pair(true, (ModRefResult)res);
++    }
++
++    //
++    // This external function is not known.
++    // Thread safe:
++    //   Worst case, it may call a sync function, i.e., a memory barrier
++    // Not thread safe:
++    //   If P doesn't escape to an external function, it cannot be modified.
++    //
++    if (ThreadSafeDSAA && escapes)
++      return std::make_pair(true, ModRef);
++
++    const Function *Caller = CS.getInstruction()->getParent()->getParent();
++    DSGraph *G = TD->getDSGraph(*Caller);
++    DSScalarMap::iterator NI = G->getScalarMap().find(P);
++    if (NI == G->getScalarMap().end()) {
++      // If it wasn't in the local function graph, check the global graph.  This
++      // can occur for globals who are locally reference but hoisted out to the
++      // globals graph despite that.
++      G = G->getGlobalsGraph();
++      NI = G->getScalarMap().find(P);
++      if (NI == G->getScalarMap().end())
++        return std::make_pair(false, ModRef);
++    }
++
++    DSNode *N = NI->second.getNode();
++    if (N->isCompleteNode() && !N->isExternalNode())
++      return std::make_pair(true, NoModRef);
++    else
++      return std::make_pair(false, ModRef);
++  }
++
++  // Get the graphs for the callee and caller.  Note that we want the BU graph
++  // for the callee because we don't want all caller's effects incorporated!
++  const Function *Caller = CS.getInstruction()->getParent()->getParent();
++  DSGraph* CallerTDGraph = TD->getDSGraph(*Caller);
++  DSGraph* CalleeBUGraph = BU->getDSGraph(*F);
++
++  // Figure out which node in the TD graph this pointer corresponds to.
++  DSScalarMap &CallerSM = CallerTDGraph->getScalarMap();
++  DSScalarMap::iterator NI = CallerSM.find(P);
++  if (NI == CallerSM.end()) {
++    ModRefResult Result = ModRef;
++    if (isa<ConstantPointerNull>(P) || isa<UndefValue>(P))
++      return std::make_pair(true, NoModRef);  // null is never modified :)
++    else {
++      assert(isa<GlobalVariable>(P) &&
++    cast<GlobalVariable>(P)->getType()->getElementType()->isFirstClassType() &&
++             "This isn't a global that DSA inconsiderately dropped "
++             "from the graph?");
++
++      DSGraph* GG = CallerTDGraph->getGlobalsGraph();
++      DSScalarMap::iterator NI = GG->getScalarMap().find(P);
++      if (NI != GG->getScalarMap().end() && !NI->second.isNull()) {
++        // Otherwise, if the node is only M or R, return this.  This can be
++        // useful for globals that should be marked const but are not.
++        DSNode *N = NI->second.getNode();
++        if (!N->isModifiedNode())
++          Result = (ModRefResult)(Result & ~Mod);
++        if (!N->isReadNode())
++          Result = (ModRefResult)(Result & ~Ref);
++      }
++    }
++
++    if (Result == NoModRef)
++      return std::make_pair(true, Result);
++
++    // Maybe a further AliasAnalysis can be more precise
++    return std::make_pair(false, Result);
++  }
++
++  // Compute the mapping from nodes in the callee graph to the nodes in the
++  // caller graph for this call site.
++  CallSite mCS = CallSite(const_cast<Instruction*>(CS.getInstruction()));
++  DSGraph::NodeMapTy CalleeCallerMap;
++  DSCallSite DSCS = CallerTDGraph->getDSCallSiteForCallSite(mCS);
++  CallerTDGraph->computeCalleeCallerMapping(DSCS, *F, *CalleeBUGraph,
++                                            CalleeCallerMap);
++
++  // Remember the mapping and the call site for future queries.
++  MapCS = mCS;
++
++  // Invert the mapping into CalleeCallerInvMap.
++  for (DSGraph::NodeMapTy::iterator I = CalleeCallerMap.begin(),
++         E = CalleeCallerMap.end(); I != E; ++I)
++    CallerCalleeMap.insert(std::make_pair(I->second.getNode(), I->first));
++
++  N = NI->second.getNode();
++  goto HaveMappingInfo;
++}
+diff --git a/lib/DSA/DataStructureStats.cpp b/lib/DSA/DataStructureStats.cpp
+index f8a7f4b..6a648a2 100644
+--- a/lib/DSA/DataStructureStats.cpp
++++ b/lib/DSA/DataStructureStats.cpp
+@@ -20,7 +20,7 @@
+ #include "llvm/IR/Constants.h"
+ #include "llvm/IR/Function.h"
+ #include "llvm/IR/Instructions.h"
+-#include "llvm/IR/InstVisitor.h"
++#include "llvm/InstVisitor.h"
+ #include "llvm/Pass.h"
+ #include "llvm/ADT/Statistic.h"
+ #include "llvm/Support/Debug.h"
+@@ -82,7 +82,7 @@ namespace {
+     void getAnalysisUsage(AnalysisUsage &AU) const {
+       AU.setPreservesAll();
+       AU.addRequired<TDDataStructures>();
+-      AU.addRequired<DataLayoutPass>();
++      AU.addRequired<DataLayout>();
+       AU.addRequired<dsa::TypeSafety<TDDataStructures> >();
+     }
+ 
+@@ -238,7 +238,7 @@ void DSGraphStats::visitStore(StoreInst &SI) {
+ 
+ bool DSGraphStats::runOnFunction(Function& F) {
+   DS = &getAnalysis<TDDataStructures>();
+-  TD = &getAnalysis<DataLayoutPass>().getDataLayout();
++  TD = &getAnalysis<DataLayout>();
+   TS = &getAnalysis<dsa::TypeSafety<TDDataStructures> >();
+   TDGraph = DS->getDSGraph(F);
+   countCallees(F);
+diff --git a/lib/DSA/EquivClassGraphs.cpp b/lib/DSA/EquivClassGraphs.cpp
+index a92abb6..0cf08b2 100644
+--- a/lib/DSA/EquivClassGraphs.cpp
++++ b/lib/DSA/EquivClassGraphs.cpp
+@@ -20,7 +20,7 @@
+ #include "llvm/IR/Module.h"
+ #include "llvm/Pass.h"
+ #include "dsa/DSGraph.h"
+-#include "llvm/IR/CallSite.h"
++#include "llvm/Support/CallSite.h"
+ #include "llvm/Support/Debug.h"
+ #include "llvm/ADT/SCCIterator.h"
+ #include "llvm/ADT/Statistic.h"
+diff --git a/lib/DSA/Local.cpp b/lib/DSA/Local.cpp
+index 51ab6f6..53e8d49 100644
+--- a/lib/DSA/Local.cpp
++++ b/lib/DSA/Local.cpp
+@@ -31,8 +31,8 @@
+ #include "llvm/Support/CommandLine.h"
+ #include "llvm/Support/Debug.h"
+ #include "llvm/Support/FormattedStream.h"
+-#include "llvm/IR/GetElementPtrTypeIterator.h"
+-#include "llvm/IR/InstVisitor.h"
++#include "llvm/Support/GetElementPtrTypeIterator.h"
++#include "llvm/InstVisitor.h"
+ #include "llvm/Support/Timer.h"
+ 
+ #include <fstream>
+@@ -402,7 +402,7 @@ void GraphBuilder::visitLoadInst(LoadInst &LI) {
+   // check that it is the inserted value
+   if(TypeInferenceOptimize)
+     if(LI.hasOneUse())
+-      if(StoreInst *SI = dyn_cast<StoreInst>(*(LI.user_begin())))
++      if(StoreInst *SI = dyn_cast<StoreInst>(*(LI.use_begin())))
+         if(SI->getOperand(0) == &LI) {
+         ++NumIgnoredInst;
+         return;
+@@ -562,7 +562,7 @@ void GraphBuilder::visitVAArgInst(VAArgInst &I) {
+ void GraphBuilder::visitIntToPtrInst(IntToPtrInst &I) {
+   DSNode *N = createNode();
+   if(I.hasOneUse()) {
+-    if(isa<ICmpInst>(*(I.user_begin()))) {
++    if(isa<ICmpInst>(*(I.use_begin()))) {
+       NumBoringIntToPtr++;
+       return;
+     }
+@@ -576,13 +576,13 @@ void GraphBuilder::visitIntToPtrInst(IntToPtrInst &I) {
+ void GraphBuilder::visitPtrToIntInst(PtrToIntInst& I) {
+   DSNode* N = getValueDest(I.getOperand(0)).getNode();
+   if(I.hasOneUse()) {
+-    if(isa<ICmpInst>(*(I.user_begin()))) {
++    if(isa<ICmpInst>(*(I.use_begin()))) {
+       NumBoringIntToPtr++;
+       return;
+     }
+   }
+   if(I.hasOneUse()) {
+-    Value *V = dyn_cast<Value>(*(I.user_begin()));
++    Value *V = dyn_cast<Value>(*(I.use_begin()));
+     DenseSet<Value *> Seen;
+     while(V && V->hasOneUse() &&
+           Seen.insert(V).second) {
+@@ -592,7 +592,7 @@ void GraphBuilder::visitPtrToIntInst(PtrToIntInst& I) {
+         break;
+       if(isa<CallInst>(V))
+         break;
+-      V = dyn_cast<Value>(*(V->user_begin()));
++      V = dyn_cast<Value>(*(V->use_begin()));
+     }
+     if(isa<BranchInst>(V)){
+       NumBoringIntToPtr++;
+@@ -802,7 +802,7 @@ void GraphBuilder::visitGetElementPtrInst(User &GEP) {
+         Offset = 0;
+         break;
+       }
+-    } else if (const PointerType *PtrTy = dyn_cast<PointerType>(*I)) {
++    } else if (PointerType *PtrTy = dyn_cast<PointerType>(*I)) {
+       // Get the type pointed to by the pointer
+       Type *CurTy = PtrTy->getElementType();
+ 
+@@ -1372,7 +1372,7 @@ void GraphBuilder::mergeInGlobalInitializer(GlobalVariable *GV) {
+   // be adding to it.
+   //
+   Type * ElementType = GV->getType()->getElementType();
+-  while(ArrayType *ATy = dyn_cast<ArrayType>(ElementType)) {
++  while(const ArrayType *ATy = dyn_cast<ArrayType>(ElementType)) {
+     ElementType = ATy->getElementType();
+   }
+   if(!NH.getNode()->isNodeCompletelyFolded()) {
+@@ -1442,7 +1442,7 @@ void handleMagicSections(DSGraph* GlobalsGraph, Module& M) {
+ char LocalDataStructures::ID;
+ 
+ bool LocalDataStructures::runOnModule(Module &M) {
+-  init(&getAnalysis<DataLayoutPass>().getDataLayout());
++  init(&getAnalysis<DataLayout>());
+   addrAnalysis = &getAnalysis<AddressTakenAnalysis>();
+ 
+   // First step, build the globals graph.
+diff --git a/lib/DSA/Printer.cpp b/lib/DSA/Printer.cpp
+index 2256187..2b01abf 100644
+--- a/lib/DSA/Printer.cpp
++++ b/lib/DSA/Printer.cpp
+@@ -294,7 +294,7 @@ void DSGraph::writeGraphToFile(llvm::raw_ostream &O,
+   O << "Writing '" << Filename << "'...";
+   if (!DontPrintGraphs) {
+     std::string Error;
+-    llvm::raw_fd_ostream F(Filename.c_str(), Error, sys::fs::F_Text);
++    llvm::raw_fd_ostream F(Filename.c_str(), Error);
+ 
+     if (Error.size()) {
+       O << "  error opening file for writing! " << Error << "\n";
+diff --git a/lib/DSA/StdLibInfo.cpp b/lib/DSA/StdLibInfo.cpp
+new file mode 100644
+index 0000000..432b294
+--- /dev/null
++++ b/lib/DSA/StdLibInfo.cpp
+@@ -0,0 +1,515 @@
++//                     The LLVM Compiler Infrastructure
++//
++// This file was developed by the LLVM research group and is distributed under
++// the University of Illinois Open Source License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// Recognize common standard c library functions and generate graphs for them
++//
++//===----------------------------------------------------------------------===//
++
++#include "dsa/StdLibInfo.h"
++#include "llvm/IR/Module.h"
++#include "llvm/IR/Function.h"
++
++using namespace llvm;
++
++namespace {
++
++//
++// libActions for known functions
++//
++
++#define NRET_NARGS    {0,0,0,0,0,0,0,0,0,0}
++#define YRET_NARGS    {1,0,0,0,0,0,0,0,0,0}
++#define NRET_YARGS    {0,1,1,1,1,1,1,1,1,1}
++#define YRET_YARGS    {1,1,1,1,1,1,1,1,1,1}
++#define NRET_NYARGS   {0,0,1,1,1,1,1,1,1,1}
++#define YRET_NYARGS   {1,0,1,1,1,1,1,1,1,1}
++#define NRET_YNARGS   {0,1,0,0,0,0,0,0,0,0}
++#define YRET_YNARGS   {1,1,0,0,0,0,0,0,0,0}
++#define YRET_NNYARGS  {1,0,0,1,1,1,1,1,1,1}
++#define NRET_NNYARGS  {0,0,0,1,1,1,1,1,1,1}
++#define YRET_NNYNARGS {1,0,0,1,0,0,0,0,0,0}
++#define NRET_NNNYARGS {0,0,0,0,1,1,1,1,1,1}
++#define NRET_YYNARGS  {0,1,1,0,0,0,0,0,0,0}
++
++#define NOFLAGS           false, false, -1, -1
++#define COLLAPSE          true, false, -1, -1
++#define MEMBARRIER        false, true, -1, -1
++#define THREADCREATE(a,b) false, false, a, b
++
++const struct {
++  const char* name;
++  StdLibInfo::LibAction action;
++} recFuncs[] = {
++  {"stat",       {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fstat",      {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"lstat",      {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  {"getenv",     {NRET_YNARGS, YRET_NARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"getrusage",  {NRET_YNARGS, YRET_NYARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"getrlimit",  {NRET_YNARGS, YRET_NYARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"setrlimit",  {NRET_YARGS,  YRET_NARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"getcwd",     {NRET_NYARGS, YRET_YNARGS, NRET_NARGS, YRET_YNARGS, NOFLAGS}},
++  
++  {"select",    {NRET_YARGS, YRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"_setjmp",   {NRET_YARGS, YRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"longjmp",   {NRET_YARGS, NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  {"remove",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"rename",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"unlink",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fileno",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"create",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"write",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"read",      {NRET_YARGS, YRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"truncate",  {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"open",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++ 
++  {"chdir",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"mkdir",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"rmdir",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  {"chmod",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fchmod",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++ 
++  {"kill",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pipe",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  {"execl",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"execlp",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"execle",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"execv",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"execvp",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++ 
++  {"time",      {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"times",     {NRET_YARGS,  YRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"ctime",     {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"asctime",   {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"utime",     {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"localtime", {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"gmtime",    {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++  {"ftime",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}}, 
++
++  // printf not strictly true, %n could cause a write
++  {"printf",    {NRET_YARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fprintf",   {NRET_YARGS,  NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fprintf",   {NRET_YARGS,  NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sprintf",   {NRET_YARGS,  NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"snprintf",  {NRET_YARGS,  NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"vsnprintf", {NRET_YARGS,  YRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sscanf",    {NRET_YARGS,  YRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"scanf",     {NRET_YARGS,  YRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fscanf",    {NRET_YARGS,  YRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"calloc",    {NRET_NARGS, YRET_NARGS, YRET_NARGS,  NRET_NARGS, NOFLAGS}},
++  {"malloc",    {NRET_NARGS, YRET_NARGS, YRET_NARGS,  NRET_NARGS, NOFLAGS}},
++  {"valloc",    {NRET_NARGS, YRET_NARGS, YRET_NARGS,  NRET_NARGS, NOFLAGS}},
++  {"realloc",   {NRET_NARGS, YRET_NARGS, YRET_YNARGS, YRET_YNARGS,NOFLAGS}},
++  {"free",      {NRET_NARGS, NRET_NARGS, NRET_YNARGS, NRET_NARGS, NOFLAGS}},
++ 
++  {"strdup",    {NRET_YARGS, YRET_NARGS, YRET_NARGS, YRET_YARGS, NOFLAGS}},
++  {"__strdup",  {NRET_YARGS, YRET_NARGS, YRET_NARGS, YRET_YARGS, NOFLAGS}},
++  {"wcsdup",    {NRET_YARGS, YRET_NARGS, YRET_NARGS, YRET_YARGS, NOFLAGS}},
++ 
++  {"strlen",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"wcslen",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++ 
++  {"atoi",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"atof",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"atol",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"atoll",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"atoq",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++ 
++  {"memcmp",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"strcmp",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"wcscmp",      {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"strncmp",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"wcsncmp",     {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"strcasecmp",  {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"wcscasecmp",  {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"strncasecmp", {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"wcsncasecmp", {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  {"strcat",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"strncat",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  
++  {"strcpy",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"stpcpy",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"wcscpy",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"strncpy",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"wcsncpy",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"memcpy",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"memccpy",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"wmemccpy",   {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}},
++  {"memmove",    {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YARGS, COLLAPSE}}, 
++  
++  {"bcopy",      {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_YARGS, COLLAPSE}},
++  {"bcmp",       {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, COLLAPSE}},
++  
++  {"strerror",   {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  COLLAPSE}},
++  {"clearerr",   {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"strstr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"wcsstr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"strspn",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  COLLAPSE}},
++  {"wcsspn",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  COLLAPSE}},
++  {"strcspn",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  COLLAPSE}},
++  {"wcscspn",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS,  COLLAPSE}},
++  {"strtok",     {NRET_YARGS, YRET_YARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"strpbrk",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"wcspbrk",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++
++  {"strchr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"wcschr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"strrchr",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"wcsrchr",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"strchrnul",  {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"wcschrnul",  {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++
++  {"memchr",     {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"wmemchr",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++  {"memrchr",    {NRET_YARGS, YRET_NARGS, NRET_NARGS, YRET_YNARGS, COLLAPSE}},
++
++  {"memalign",   {NRET_NARGS, YRET_NARGS, YRET_NARGS,  NRET_NARGS, NOFLAGS}},
++  {"posix_memalign",  {NRET_YARGS, YRET_YNARGS, NRET_NARGS,  NRET_NARGS, NOFLAGS}},
++
++  {"perror",     {NRET_YARGS,  NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  {"feof",       {NRET_YARGS,  NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fflush",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fpurge",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fclose",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fopen",      {NRET_YARGS,  YRET_NARGS, YRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"ftell",      {NRET_YARGS,  NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fseek",      {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, COLLAPSE}},
++  {"rewind",     {NRET_YARGS,  NRET_YARGS, NRET_NARGS, NRET_NARGS, COLLAPSE}},
++  {"ferror",     {NRET_YARGS,  NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fwrite",     {NRET_YARGS,  NRET_NYARGS,NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fread",      {NRET_NYARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"fdopen",     {NRET_YARGS,  YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"__errno_location", {NRET_NARGS, YRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"puts",       {NRET_YARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"gets",       {NRET_NARGS,  YRET_YARGS,  NRET_NARGS, YRET_YNARGS, NOFLAGS}},
++  {"fgets",      {NRET_NYARGS, YRET_YNARGS, NRET_NARGS, YRET_YNARGS, NOFLAGS}},
++  {"getc",       {NRET_YNARGS, YRET_YNARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"ungetc",     {NRET_YNARGS, YRET_YARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"_IO_getc",   {NRET_YNARGS, YRET_YNARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"fgetc",      {NRET_YNARGS, YRET_YNARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"putc",       {NRET_NARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"_IO_putc",   {NRET_NARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"putchar",    {NRET_NARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"fputs",      {NRET_YARGS,  NRET_NYARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++  {"fputc",      {NRET_YARGS,  NRET_NYARGS, NRET_NARGS, NRET_NARGS,  NOFLAGS}},
++
++  // POSIX Threads
++  {"pthread_attr_destroy",         {NRET_YARGS, NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_init",            {NRET_YARGS, NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_attr_getdetachstate",  {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getguardsize",    {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getinheritsched", {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getschedparam",   {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getschedpolicy",  {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getscope",        {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getstackaddr",    {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_getstacksize",    {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_attr_setdetachstate",  {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setguardsize",    {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setinheritsched", {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setschedparam",   {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setschedpolicy",  {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setscope",        {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setstackaddr",    {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_attr_setstacksize",    {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_barrier_destroy",   {NRET_YARGS, NRET_YARGS,   NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_barrier_init",      {NRET_YARGS, NRET_YNARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_barrier_wait",      {NRET_YARGS, NRET_YARGS,   NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++
++  {"pthread_barrierattr_destroy",    {NRET_YARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_barrierattr_getpshared", {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_barrierattr_init",       {NRET_NARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_barrierattr_setpshared", {NRET_YNARGS, NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_cancel", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // TODO: pthread_cleanup_push
++  // TODO: pthread_cleanup_pop
++
++  {"pthread_cond_broadcast", {NRET_YARGS, NRET_YARGS,   NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_cond_destroy",   {NRET_YARGS, NRET_YARGS,   NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_cond_init",      {NRET_YARGS, NRET_YNARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_cond_signal",    {NRET_YARGS, NRET_YARGS,   NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_cond_timedwait", {NRET_YARGS, NRET_YYNARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_cond_wait",      {NRET_YARGS, NRET_YARGS,   NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++
++  {"pthread_condattr_destroy",    {NRET_YARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_condattr_getpshared", {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_condattr_init",       {NRET_NARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_condattr_setpshared", {NRET_YNARGS, NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_create",  {NRET_YYNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, THREADCREATE(2,3)}},
++
++  {"pthread_detach", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_equal",  {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_exit",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_getconcurrency", {NRET_NARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_getschedparam",  {NRET_NYARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_getspecific",    {NRET_NARGS,  NRET_NARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_join",       {NRET_NARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_key_create", {NRET_NARGS, NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_key_delete", {NRET_NARGS, NRET_NARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_mutex_destroy", {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutex_init",    {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutex_lock",    {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_mutex_trylock", {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_mutex_unlock",  {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++
++  {"pthread_mutex_getprioceiling", {NRET_YNARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutex_setprioceiling", {NRET_YARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_mutexattr_destroy",        {NRET_YARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_getprioceiling", {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_getprotocol",    {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_getpshared",     {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_gettype",        {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_init",           {NRET_NARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_setprioceiling", {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_setprotocol",    {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_setpshared",     {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_mutexattr_settype",        {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_once", {NRET_YARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++
++  {"pthread_rwlock_destroy",   {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_rwlock_init",      {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_rwlock_rdlock",    {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_rwlock_tryrdlock", {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_rwlock_trywrlock", {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_rwlock_unlock",    {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++  {"pthread_rwlock_wrlock",    {NRET_YARGS, NRET_YARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++
++  {"pthread_rwlockattr_destroy",    {NRET_YARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_rwlockattr_getpshared", {NRET_YNARGS, NRET_NYARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_rwlockattr_init",       {NRET_NARGS,  NRET_YARGS,  NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_rwlockattr_setpshared", {NRET_YNARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  {"pthread_self",           {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_setcancelstate", {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_setcanceltype",  {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_setconcurrency", {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_setschedparam",  {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_setspecific",    {NRET_YARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pthread_testcancel",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  // SAFECode Intrinsics
++  {"sc.lscheck", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.lscheckui", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.lscheckalign", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.lscheckalignui", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_register_stack", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_unregister_stack", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_register_global", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_unregister_global", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_register", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_unregister", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.pool_argvregister", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++
++  // CIF Intrinsics
++  {"__if_pool_get_label", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"__if_pool_set_label", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // CStdLib Runtime Wrapper Functions
++  {"pool_strncpy",    {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  COLLAPSE}},
++  {"pool_strcpy",     {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  COLLAPSE}},
++  {"pool_stpcpy",     {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  COLLAPSE}},
++  // strchr and index have same functionality
++  {"pool_strchr",     {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   COLLAPSE}},
++  {"pool_index",      {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   COLLAPSE}},
++  // strrchr and rindex have same functionality
++  {"pool_strrchr",    {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   COLLAPSE}},
++  {"pool_rindex",     {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   COLLAPSE}},
++  {"pool_strcat",     {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  COLLAPSE}},
++  {"pool_strncat",    {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  COLLAPSE}},
++  {"pool_strstr",     {NRET_NNYARGS, YRET_NARGS,    NRET_NARGS, YRET_NNYNARGS, COLLAPSE}},
++  {"pool_strcasestr", {NRET_NNYARGS, YRET_NARGS,    NRET_NARGS, YRET_NNYNARGS, COLLAPSE}},
++  {"pool_strpbrk",    {NRET_NNYARGS, YRET_NARGS,    NRET_NARGS, YRET_NNYNARGS, COLLAPSE}},
++  {"pool_strspn",     {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, NRET_NARGS,    COLLAPSE}},
++  {"pool_strcspn",    {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, NRET_NARGS,    COLLAPSE}},
++  {"pool_memccpy",    {NRET_NNYARGS, YRET_NNYARGS,  NRET_NARGS, YRET_NNYARGS,  COLLAPSE}},
++  {"pool_memchr",     {NRET_NYARGS,  YRET_NARGS,    NRET_NARGS, YRET_NYARGS,   COLLAPSE}},
++  {"pool_strcmp",     {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_strncmp",    {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_strlen",     {NRET_NYARGS,  NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_strnlen",    {NRET_NYARGS,  NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_memcmp",     {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_strcasecmp", {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_strncasecmp",{NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"pool_bcopy",      {NRET_NNYARGS, NRET_NNNYARGS, NRET_NARGS, NRET_NNYARGS,  COLLAPSE}},
++  {"pool_bcmp",       {NRET_NNYARGS, NRET_NARGS,    NRET_NARGS, NRET_NARGS,    COLLAPSE}},
++
++  // format string intrinsics and functions
++  {"sc.fsparameter",  {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.fscallinfo",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"sc.fscallinfo_debug",{NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_printf",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_fprintf",    {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_sprintf",    {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_snprintf",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_err",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_errx",       {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_warn",       {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_warnx",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_syslog",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_scanf",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_fscanf",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool_sscanf",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool___printf_chk",   {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool___fprintf_chk",  {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool___sprintf_chk",  {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  {"pool___snprintf_chk", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  
++  // Type Checks
++  {"trackArgvType",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackEnvpType",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackGlobal",          {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackArray",           {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackStoreInst",       {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackStringInput",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"compareTypeAndNumber", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"compareVAArgType",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"getTypeTag",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"checkType",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackInitInst",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackUnInitInst",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"copyTypeInfo",         {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"setTypeInfo",         {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"setVAInfo", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"copyVAInfo", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackctype",           {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackctype_32",        {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackStrcpyInst",      {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackStrcnpyInst",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackStrcatInst",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgetcwd",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgetpwuid",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgethostname",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgethostbyname",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgetservbyname",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgetaddrinfo",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackgetsockname",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackaccept",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackpoll",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackpipe",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++  {"trackReadLink",     {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS,   NOFLAGS}},
++
++#if 0
++  {"wait",       {false, false, false, false,  true, false, false, false, NOFLAGS}},
++#endif
++
++  // C++ functions, as mangled on linux gcc 4.2
++  // operator new(unsigned long)
++  {"_Znwm",      {NRET_NARGS, YRET_NARGS, YRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // operator new[](unsigned long)
++  {"_Znam",      {NRET_NARGS, YRET_NARGS, YRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // operator new(unsigned int)
++  {"_Znwj",      {NRET_NARGS, YRET_NARGS, YRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // operator new[](unsigned int)
++  {"_Znaj",      {NRET_NARGS, YRET_NARGS, YRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // operator delete(void*)
++  {"_ZdlPv",     {NRET_NARGS, NRET_NARGS, NRET_YNARGS,NRET_NARGS, NOFLAGS}},
++  // operator delete[](void*)
++  {"_ZdaPv",     {NRET_NARGS, NRET_NARGS, NRET_YNARGS, NRET_NARGS, NOFLAGS}},
++  // flush
++  {"_ZNSo5flushEv", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // << operator
++  {"_ZNSolsEd", {NRET_YARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // << operator
++  {"_ZNSolsEPFRSoS_E", {NRET_YARGS, NRET_YNARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  //endl
++  {"_ZSt4endlIcSt11char_traitsIcEERSt13basic_ostreamIT_T0_ES6_", {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++  // Terminate the list of special functions recognized by this pass
++  {0,            {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, NOFLAGS}},
++};
++
++const struct {
++  Intrinsic::ID id;
++  StdLibInfo::LibAction action;
++} recIntrinsics[] = {
++  /* TODO: why do we have to take care of memory barrier? */
++#if 0
++  {Intrinsic::memory_barrier, {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++#else
++  {Intrinsic::not_intrinsic, {NRET_NARGS, NRET_NARGS, NRET_NARGS, NRET_NARGS, MEMBARRIER}},
++#endif
++};
++
++/*
++   Functions to add
++   freopen
++   strftime
++   strtoul
++   strtol
++   strtoll
++   ctype family
++   setbuf
++   setvbuf
++   __strpbrk_c3
++   open64/fopen64/lseek64
++ */
++
++}
++
++void StdLibInfo::initialize(Module &M) {
++  if (&M == module)
++    return;
++
++  module = &M;
++  functionMap.clear();
++  intrinsicMap.clear();
++
++  for (int x = 0; recFuncs[x].name; ++x) {
++    if (Function* F = M.getFunction(recFuncs[x].name))
++      if (F->isDeclaration())
++        functionMap[F] = &recFuncs[x].action;
++  }
++
++  for (int x = 0; recIntrinsics[x].id; ++x) {
++    intrinsicMap[recIntrinsics[x].id] = &recIntrinsics[x].action;
++  }
++}
++
++const StdLibInfo::LibAction*
++StdLibInfo::getLibActionForFunction(const Function *F) const {
++  assert(module && "Forgot to call StdLibInfo::initializeForModule?");
++
++  if (!F)
++    return NULL;
++
++  Intrinsic::ID id = (Intrinsic::ID)F->getIntrinsicID();
++  IntrinsicMapTy::const_iterator ii = intrinsicMap.find(id);
++  if (ii != intrinsicMap.end())
++    return ii->second;
++
++  FunctionMapTy::const_iterator fi = functionMap.find(F);
++  if (fi != functionMap.end())
++    return fi->second;
++
++  return NULL;
++}
++
++const StdLibInfo::LibAction*
++StdLibInfo::getLibActionForFunctionName(StringRef name) const {
++  // Linear search since this isn't used on a critical path
++  for (int x = 0; recFuncs[x].name; ++x) {
++    if (recFuncs[x].name == name)
++      return &recFuncs[x].action;
++  }
++  return NULL;
++}
+diff --git a/lib/DSA/StdLibPass.cpp b/lib/DSA/StdLibPass.cpp
+index 32d3c4b..2ab30f2 100644
+--- a/lib/DSA/StdLibPass.cpp
++++ b/lib/DSA/StdLibPass.cpp
+@@ -20,7 +20,7 @@
+ #include "llvm/IR/DerivedTypes.h"
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/IR/Intrinsics.h"
+-#include "llvm/IR/GetElementPtrTypeIterator.h"
++#include "llvm/Support/GetElementPtrTypeIterator.h"
+ #include "llvm/IR/DataLayout.h"
+ #include "llvm/Support/CommandLine.h"
+ #include "llvm/Support/Debug.h"
+@@ -453,7 +453,7 @@ void
+ StdLibDataStructures::eraseCallsTo(Function* F) {
+   typedef std::pair<DSGraph*,Function*> RemovalPair;
+   DenseSet<RemovalPair> ToRemove;
+-  for (Value::user_iterator ii = F->user_begin(), ee = F->user_end();
++  for (Value::use_iterator ii = F->use_begin(), ee = F->use_end();
+        ii != ee; ++ii)
+     if (CallInst* CI = dyn_cast<CallInst>(*ii)){
+       if (CI->getCalledValue() == F) {
+@@ -473,7 +473,7 @@ StdLibDataStructures::eraseCallsTo(Function* F) {
+       }
+     } else if(ConstantExpr *CE = dyn_cast<ConstantExpr>(*ii)) {
+       if(CE->isCast()) {
+-        for (Value::user_iterator ci = CE->user_begin(), ce = CE->user_end();
++        for (Value::use_iterator ci = CE->use_begin(), ce = CE->use_end();
+              ci != ce; ++ci) {
+           if (CallInst* CI = dyn_cast<CallInst>(*ci)){
+             if(CI->getCalledValue() == CE) {
+@@ -524,7 +524,7 @@ StdLibDataStructures::processRuntimeCheck (Module & M,
+   // Scan through all direct calls to the function (there should only be direct
+   // calls) and process each one.
+   //
+-  for (Value::user_iterator ii = F->user_begin(), ee = F->user_end();
++  for (Value::use_iterator ii = F->use_begin(), ee = F->use_end();
+        ii != ee; ++ii) {
+     if (CallInst* CI = dyn_cast<CallInst>(*ii)) {
+       if (CI->getCalledValue() == F) {
+@@ -547,6 +547,9 @@ StdLibDataStructures::processRuntimeCheck (Module & M,
+ 
+ bool
+ StdLibDataStructures::runOnModule (Module &M) {
++  
++  stdLibInfo.initialize(M);
++
+   //
+   // Get the results from the local pass.
+   //
+@@ -679,7 +682,7 @@ StdLibDataStructures::runOnModule (Module &M) {
+ 
+ 
+ void StdLibDataStructures::processFunction(int x, Function *F) {
+-  for (Value::user_iterator ii = F->user_begin(), ee = F->user_end();
++  for (Value::use_iterator ii = F->use_begin(), ee = F->use_end();
+        ii != ee; ++ii)
+     if (CallInst* CI = dyn_cast<CallInst>(*ii)){
+       if (CI->getCalledValue() == F) {
+@@ -827,7 +830,7 @@ void StdLibDataStructures::processFunction(int x, Function *F) {
+       }
+     } else if(ConstantExpr *CE = dyn_cast<ConstantExpr>(*ii)) {
+       if(CE->isCast()) 
+-        for (Value::user_iterator ci = CE->user_begin(), ce = CE->user_end();
++        for (Value::use_iterator ci = CE->use_begin(), ce = CE->use_end();
+              ci != ce; ++ci) {
+ 
+           if (CallInst* CI = dyn_cast<CallInst>(*ci)){
+diff --git a/lib/DSA/Steensgaard.cpp b/lib/DSA/Steensgaard.cpp
+new file mode 100644
+index 0000000..aed3cdd
+--- /dev/null
++++ b/lib/DSA/Steensgaard.cpp
+@@ -0,0 +1,164 @@
++//===- Steensgaard.cpp - Context Insensitive Data Structure Analysis ------===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file was developed by the LLVM research group and is distributed under
++// the University of Illinois Open Source License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This pass computes a context-insensitive data analysis graph.  It does this
++// by computing the local analysis graphs for all of the functions, then merging
++// them together into a single big graph without cloning.
++//
++//===----------------------------------------------------------------------===//
++
++#include "dsa/DataStructure.h"
++#include "dsa/DSGraph.h"
++#include "llvm/Analysis/AliasAnalysis.h"
++#include "llvm/Analysis/Passes.h"
++#include "llvm/IR/Module.h"
++#include "llvm/Support/Debug.h"
++#include "llvm/Support/FormattedStream.h"
++#include <iostream>
++#include <ostream>
++
++using namespace llvm;
++
++static RegisterPass<SteensgaardDataStructures>
++X("dsa-steens", "Context-insensitive Data Structure Analysis");
++
++char SteensgaardDataStructures::ID;
++
++SteensgaardDataStructures::~SteensgaardDataStructures() {
++  releaseMemory();
++}
++
++void
++SteensgaardDataStructures::releaseMemory() {
++  delete ResultGraph; 
++  ResultGraph = 0;
++  DataStructures::releaseMemory();
++}
++
++void
++SteensgaardDataStructures::print(llvm::raw_ostream &O, const Module *M) const {
++  assert(ResultGraph && "Result graph has not yet been computed!");
++  ResultGraph->writeGraphToFile(O, "steensgaards");
++}
++
++
++/// run - Build up the result graph, representing the pointer graph for the
++/// program.
++///
++bool
++SteensgaardDataStructures::runOnModule(Module &M) {
++  DS = &getAnalysis<EQTDDataStructures>();
++  init(DS, true, true, true, false);
++  return runOnModuleInternal(M);
++}
++
++bool
++SteensgaardDataStructures::runOnModuleInternal(Module &M) {
++  assert(ResultGraph == NULL && "Result graph already allocated!");
++  
++  // Create a new, empty, graph.
++  // The GlobalsGraph was created for us by init()
++  ResultGraph = new DSGraph(GlobalECs, getDataLayout(), *TypeSS, GlobalsGraph);
++
++  // Merge graphs for non-external functions into this graph.
++  for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I) {
++    if (!I->isDeclaration())
++      ResultGraph->cloneInto(DS->getDSGraph(*I));  // ugh, should be "cloneFrom"
++  }
++
++  ResultGraph->removeTriviallyDeadNodes();
++
++  // Now that all graphs are inlined, eliminate call nodes.
++  // Start with a copy of the original call sites.
++  std::list<DSCallSite> &Calls = ResultGraph->getFunctionCalls();
++
++  for (std::list<DSCallSite>::iterator CI = Calls.begin(); CI != Calls.end();) {
++    DSCallSite &CurCall = *CI++;
++
++    // Get possible call targets at this call site.
++    std::vector<const Function*> CallTargets;
++    if (CurCall.isDirectCall())
++      CallTargets.push_back(CurCall.getCalleeFunc());
++    else
++      CurCall.getCalleeNode()->addFullFunctionList(CallTargets);
++
++    // Loop over the possible targets, eliminating as many as possible.
++    // To eliminate, we merge the retval and args at the callsite with
++    // those at the definition (thus we can't eliminate external calls).
++    for (unsigned c = 0; c != CallTargets.size(); ) {
++      const Function *F = CallTargets[c];
++      if (!F->isDeclaration()) {
++        ResolveFunctionCall(F, CurCall, ResultGraph->getReturnNodes()[F]);
++        CallTargets[c] = CallTargets.back();
++        CallTargets.pop_back();
++      } else
++        ++c;  // Cannot eliminate this call, skip over it...
++    }
++
++    if (CallTargets.empty()) {        // Eliminated all calls?
++      std::list<DSCallSite>::iterator I = CI;
++      Calls.erase(--I);               // Remove entry
++    }
++  }
++
++  // Remove our knowledge of what the return values of the functions are, except
++  // for functions that are externally visible from this module (e.g. main).  We
++  // keep these functions so that their arguments are marked incomplete.
++  for (DSGraph::ReturnNodesTy::iterator
++         I = ResultGraph->getReturnNodes().begin(),
++         E = ResultGraph->getReturnNodes().end(); I != E; ) {
++    if (I->first->hasInternalLinkage())
++      ResultGraph->getReturnNodes().erase(I++);
++    else
++      ++I;
++  }
++
++  // Clone the global nodes into this graph.
++  cloneGlobalsInto(ResultGraph, DSGraph::DontCloneCallNodes |
++                                DSGraph::DontCloneAuxCallNodes);
++
++  // Remove any nodes that are dead after all of the merging we have done.
++  ResultGraph->removeDeadNodes(DSGraph::KeepUnreachableGlobals);
++
++  // EQTDDataStructures has labeled incomplete/external nodes.  Now
++  // we propagate external labels transitively in case of node merges.
++  // TODO: need to propagate incomplete labels in the same way?
++  ResultGraph->computeExternalFlags(DSGraph::DontMarkFormalsExternal |
++                                    DSGraph::IgnoreCallSites);
++  ResultGraph->computeIntPtrFlags();
++
++  DEBUG(print(errs(), &M));
++  return false;
++}
++
++/// ResolveFunctionCall - Resolve the actual arguments of a call to function F
++/// with the specified call site descriptor.  This function links the arguments
++/// and the return value for the call site context-insensitively.
++///
++void
++SteensgaardDataStructures::ResolveFunctionCall(const Function *F, 
++                                                const DSCallSite &Call,
++                                                DSNodeHandle &RetVal) {
++
++  assert(ResultGraph != 0 && "Result graph not allocated!");
++  DSGraph::ScalarMapTy &ValMap = ResultGraph->getScalarMap();
++
++  // Handle the return value of the function...
++  if (Call.getRetVal().getNode() && RetVal.getNode())
++    RetVal.mergeWith(Call.getRetVal());
++
++  // Loop over all pointer arguments, resolving them to their provided pointers
++  unsigned PtrArgIdx = 0;
++  for (Function::const_arg_iterator AI = F->arg_begin(), AE = F->arg_end();
++       AI != AE && PtrArgIdx < Call.getNumPtrArgs(); ++AI) {
++    DSGraph::ScalarMapTy::iterator I = ValMap.find(AI);
++    if (I != ValMap.end())    // If its a pointer argument...
++      I->second.mergeWith(Call.getPtrArg(PtrArgIdx++));
++  }
++}
+diff --git a/lib/DSA/TypeSafety.cpp b/lib/DSA/TypeSafety.cpp
+index 0c0f6f8..969e1d0 100644
+--- a/lib/DSA/TypeSafety.cpp
++++ b/lib/DSA/TypeSafety.cpp
+@@ -333,7 +333,7 @@ TypeSafety<dsa>::runOnModule(Module & M) {
+   //
+   // Get access to prerequisite passes.
+   //
+-  TD      = &getAnalysis<DataLayoutPass>().getDataLayout();
++  TD      = &getAnalysis<DataLayout>();
+   dsaPass = &getAnalysis<dsa>();
+ 
+   //
+diff --git a/lib/PoolAllocate/Heuristic.cpp b/lib/PoolAllocate/Heuristic.cpp
+index 1a0f58a..a6a8b90 100644
+--- a/lib/PoolAllocate/Heuristic.cpp
++++ b/lib/PoolAllocate/Heuristic.cpp
+@@ -871,7 +871,7 @@ OnlyOverheadHeuristic::HackFunctionBody(Function &F,
+   for (std::map<const DSNode*, Value*>::iterator PDI = PDs.begin(),
+          E = PDs.end(); PDI != E; ++PDI) {
+     Value *OldPD = PDI->second;
+-    std::vector<User*> OldPDUsers(OldPD->user_begin(), OldPD->user_end());
++    std::vector<User*> OldPDUsers(OldPD->use_begin(), OldPD->use_end());
+     for (unsigned i = 0, e = OldPDUsers.size(); i != e; ++i) {
+       CallSite PDUser(cast<Instruction>(OldPDUsers[i]));
+       if (PDUser.getCalledValue() != PoolInit &&
+diff --git a/lib/PoolAllocate/PAMultipleGlobalPool.cpp b/lib/PoolAllocate/PAMultipleGlobalPool.cpp
+index 58685fa..de705b9 100644
+--- a/lib/PoolAllocate/PAMultipleGlobalPool.cpp
++++ b/lib/PoolAllocate/PAMultipleGlobalPool.cpp
+@@ -26,7 +26,7 @@
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/IR/Module.h"
+ #include "llvm/IR/TypeBuilder.h"
+-#include "llvm/IR/CFG.h"
++#include "llvm/Support/CFG.h"
+ #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+ #include "llvm/Transforms/Utils/Cloning.h"
+ #include "llvm/ADT/DepthFirstIterator.h"
+@@ -74,7 +74,7 @@ castTo (Value * V, Type * Ty, const std::string & Name, Instruction * InsertPt)
+ }
+ 
+ void PoolAllocateMultipleGlobalPool::getAnalysisUsage(AnalysisUsage &AU) const {
+-  AU.addRequired<DataLayoutPass>();
++  AU.addRequired<DataLayout>();
+   assert(0 && "PoolAllocateMultipleGlobalPool doesn't work! Needs Steensgard-like analysis, which was removed!");
+   //AU.addRequiredTransitive<SteensgaardDataStructures>();
+   // It is a big lie.
+@@ -96,7 +96,7 @@ bool PoolAllocateMultipleGlobalPool::runOnModule(Module &M) {
+   Graphs = NULL;
+   assert (Graphs && "No DSA pass available!\n");
+ 
+-  const DataLayout & TD = getAnalysis<DataLayoutPass>().getDataLayout();
++  DataLayout & TD = getAnalysis<DataLayout>();
+ 
+   // Add the pool* prototypes to the module
+   AddPoolPrototypes(&M);
+@@ -120,7 +120,7 @@ bool PoolAllocateMultipleGlobalPool::runOnModule(Module &M) {
+ }
+ 
+ void
+-PoolAllocateMultipleGlobalPool::ProcessFunctionBodySimple (Function& F, const DataLayout & TD) {
++PoolAllocateMultipleGlobalPool::ProcessFunctionBodySimple (Function& F, DataLayout & TD) {
+   std::vector<Instruction*> toDelete;
+   std::vector<ReturnInst*> Returns;
+ 
+diff --git a/lib/PoolAllocate/PASimple.cpp b/lib/PoolAllocate/PASimple.cpp
+index 7c971ee..b2ec172 100644
+--- a/lib/PoolAllocate/PASimple.cpp
++++ b/lib/PoolAllocate/PASimple.cpp
+@@ -23,7 +23,7 @@
+ #include "llvm/IR/DerivedTypes.h"
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/IR/Module.h"
+-#include "llvm/IR/CFG.h"
++#include "llvm/Support/CFG.h"
+ #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+ #include "llvm/Transforms/Utils/Cloning.h"
+ #include "llvm/ADT/DepthFirstIterator.h"
+@@ -70,7 +70,7 @@ castTo (Value * V, Type * Ty, std::string Name, Instruction * InsertPt) {
+ }
+ 
+ void PoolAllocateSimple::getAnalysisUsage(AnalysisUsage &AU) const {
+-  AU.addRequired<DataLayoutPass>();
++  AU.addRequired<DataLayout>();
+   // Get the Target Data information and the Graphs
+   if (CompleteDSA) {
+     AU.addRequiredTransitive<EQTDDataStructures>();
+@@ -131,7 +131,7 @@ bool PoolAllocateSimple::runOnModule(Module &M) {
+     Graphs = &getAnalysis<BasicDataStructures>();
+   }
+   assert (Graphs && "No DSA pass available!\n");
+-  const DataLayout & TD = getAnalysis<DataLayoutPass>().getDataLayout();
++  DataLayout & TD = getAnalysis<DataLayout>();
+ 
+   // Add the pool* prototypes to the module
+   AddPoolPrototypes(&M);
+@@ -187,7 +187,7 @@ bool PoolAllocateSimple::runOnModule(Module &M) {
+ }
+ 
+ void
+-PoolAllocateSimple::ProcessFunctionBodySimple (Function& F, const DataLayout & TD) {
++PoolAllocateSimple::ProcessFunctionBodySimple (Function& F, DataLayout & TD) {
+   // Set of instructions to delete because they have been replaced.  We record
+   // all instructions to delete first and then delete them later to avoid
+   // invalidating the iterators over the instruction list.
+diff --git a/lib/PoolAllocate/PointerCompress.cpp b/lib/PoolAllocate/PointerCompress.cpp
+index 6140cec..3e23bbb 100644
+--- a/lib/PoolAllocate/PointerCompress.cpp
++++ b/lib/PoolAllocate/PointerCompress.cpp
+@@ -24,8 +24,8 @@
+ #include "llvm/ADT/STLExtras.h"
+ #include "llvm/Support/CommandLine.h"
+ #include "llvm/Support/Debug.h"
+-#include "llvm/IR/GetElementPtrTypeIterator.h"
+-#include "llvm/IR/InstVisitor.h"
++#include "llvm/Support/GetElementPtrTypeIterator.h"
++#include "llvm/InstVisitor.h"
+ #include "llvm/Support/FormattedStream.h"
+ 
+ #include "llvm/Transforms/Utils/Cloning.h"
+diff --git a/lib/PoolAllocate/PoolAllocate.cpp b/lib/PoolAllocate/PoolAllocate.cpp
+index 24e33cd..e630942 100644
+--- a/lib/PoolAllocate/PoolAllocate.cpp
++++ b/lib/PoolAllocate/PoolAllocate.cpp
+@@ -27,7 +27,7 @@
+ #include "llvm/IR/DerivedTypes.h"
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/IR/Module.h"
+-#include "llvm/IR/CFG.h"
++#include "llvm/Support/CFG.h"
+ #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+ #include "llvm/Transforms/Utils/Cloning.h"
+ #include "llvm/ADT/DepthFirstIterator.h"
+@@ -218,7 +218,7 @@ void PoolAllocate::getAnalysisUsage(AnalysisUsage &AU) const {
+   if (lie_preserve_passes == LIE_PRESERVE_ALL)
+     AU.setPreservesAll();
+ 
+-  AU.addRequired<DataLayoutPass>();
++  AU.addRequired<DataLayout>();
+ }
+ 
+ bool PoolAllocate::runOnModule(Module &M) {
+@@ -349,8 +349,8 @@ bool PoolAllocate::runOnModule(Module &M) {
+     //  o) the called function is the function that we're replacing
+     //
+     std::vector<User *> toReplace;
+-    for (Function::user_iterator User = F->user_begin();
+-                                User != F->user_end();
++    for (Function::use_iterator User = F->use_begin();
++                                User != F->use_end();
+                                 ++User) {
+       if (CallInst * CI = dyn_cast<CallInst>(*User)) {
+         if (CI->getCalledFunction() == F)
+@@ -515,7 +515,7 @@ static void getCallsOf(Constant *C, std::vector<CallInst*> &Calls) {
+       assert (0 && "Constant is not a Function of ConstantExpr!"); 
+   }
+   Calls.clear();
+-  for (Value::user_iterator UI = F->user_begin(), E = F->user_end(); UI != E; ++UI)
++  for (Value::use_iterator UI = F->use_begin(), E = F->use_end(); UI != E; ++UI)
+     Calls.push_back(cast<CallInst>(*UI));
+ }
+ 
+@@ -529,7 +529,7 @@ static void getCallsOf(Constant *C, std::vector<CallInst*> &Calls) {
+ //
+ static void
+ OptimizePointerNotNull(Value *V, LLVMContext * Context) {
+-  for (Value::user_iterator I = V->user_begin(), E = V->user_end(); I != E; ++I) {
++  for (Value::use_iterator I = V->use_begin(), E = V->use_end(); I != E; ++I) {
+     Instruction *User = cast<Instruction>(*I);
+     if (isa<ICmpInst>(User) && cast<ICmpInst>(User)->isEquality()) {
+       ICmpInst * ICI = cast<ICmpInst>(User);
+@@ -1318,7 +1318,7 @@ static void DeleteIfIsPoolFree(Instruction *I, AllocaInst *PD,
+ 
+ void PoolAllocate::CalculateLivePoolFreeBlocks(std::set<BasicBlock*>&LiveBlocks,
+                                                Value *PD) {
+-  for (Value::user_iterator I = PD->user_begin(), E = PD->user_end(); I != E; ++I){
++  for (Value::use_iterator I = PD->use_begin(), E = PD->use_end(); I != E; ++I){
+     //
+     // The only users of the pool should be call, invoke, and cast
+     // instructions.  We know that poolfree() and pooldestroy() do not need to
+diff --git a/lib/PoolAllocate/PoolOptimize.cpp b/lib/PoolAllocate/PoolOptimize.cpp
+index 2cfdd39..15cdb9b 100644
+--- a/lib/PoolAllocate/PoolOptimize.cpp
++++ b/lib/PoolAllocate/PoolOptimize.cpp
+@@ -56,7 +56,7 @@ static void getCallsOf(Constant *C, std::vector<CallInst*> &Calls) {
+       assert (0 && "Constant is not a Function of ConstantExpr!"); 
+   }
+   Calls.clear();
+-  for (Value::user_iterator UI = F->user_begin(), E = F->user_end(); UI != E; ++UI)
++  for (Value::use_iterator UI = F->use_begin(), E = F->use_end(); UI != E; ++UI)
+     Calls.push_back(cast<CallInst>(*UI));
+ }
+ 
+@@ -218,8 +218,8 @@ bool PoolOptimize::runOnModule(Module &M) {
+        PI != E; ++PI) {
+     bool HasPoolAlloc = false, HasOtherUse = false;
+     Value *PoolDesc = *PI;
+-    for (Value::user_iterator UI = PoolDesc->user_begin(),
+-           E = PoolDesc->user_end(); UI != E; ++UI) {
++    for (Value::use_iterator UI = PoolDesc->use_begin(),
++           E = PoolDesc->use_end(); UI != E; ++UI) {
+       if (CallInst *CI = dyn_cast<CallInst>(*UI)) {
+         if (CI->getCalledFunction() == PoolInit ||
+             CI->getCalledFunction() == PoolDestroy) {
+@@ -241,14 +241,14 @@ bool PoolOptimize::runOnModule(Module &M) {
+       // Yes, if there are uses at all, nuke the pool init, destroy, and the PD.
+       if (!HasPoolAlloc) {
+         while (!PoolDesc->use_empty())
+-          cast<Instruction>(PoolDesc->user_back())->eraseFromParent();
++          cast<Instruction>(PoolDesc->use_back())->eraseFromParent();
+         if (AllocaInst *AI = dyn_cast<AllocaInst>(PoolDesc))
+           AI->eraseFromParent();
+         else
+           cast<GlobalVariable>(PoolDesc)->eraseFromParent();
+       } else {
+         // Convert all of the pool descriptor users to the BumpPtr flavor.
+-        std::vector<User*> PDUsers(PoolDesc->user_begin(), PoolDesc->user_end());
++        std::vector<User*> PDUsers(PoolDesc->use_begin(), PoolDesc->use_end());
+         
+         while (!PDUsers.empty()) {
+           CallInst *CI = cast<CallInst>(PDUsers.back());
+diff --git a/lib/PoolAllocate/RunTimeAssociate.cpp b/lib/PoolAllocate/RunTimeAssociate.cpp
+index e75004c..5d39db3 100644
+--- a/lib/PoolAllocate/RunTimeAssociate.cpp
++++ b/lib/PoolAllocate/RunTimeAssociate.cpp
+@@ -23,7 +23,7 @@
+ #include "llvm/IR/DerivedTypes.h"
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/IR/Module.h"
+-#include "llvm/IR/CFG.h"
++#include "llvm/Support/CFG.h"
+ #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+ #include "llvm/Transforms/Utils/Cloning.h"
+ #include "llvm/ADT/DepthFirstIterator.h"
+diff --git a/lib/PoolAllocate/TransformFunctionBody.cpp b/lib/PoolAllocate/TransformFunctionBody.cpp
+index 5ca8046..edf9a5a 100644
+--- a/lib/PoolAllocate/TransformFunctionBody.cpp
++++ b/lib/PoolAllocate/TransformFunctionBody.cpp
+@@ -23,7 +23,7 @@
+ #include "llvm/IR/Constants.h"
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/IR/DataLayout.h"
+-#include "llvm/IR/InstVisitor.h"
++#include "llvm/InstVisitor.h"
+ #include "llvm/Support/FormattedStream.h"
+ #include "llvm/Support/Debug.h"
+ #include "llvm/ADT/StringMap.h"
+-- 
+1.7.9.5
+

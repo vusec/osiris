@@ -1,0 +1,22 @@
+#!/bin/bash
+
+export ROOT=$(pwd)/../../
+export MINIX_APPS_DIR=$(pwd)
+
+# first check if we can handle the request ourselves
+(
+mode=$1
+shift || mode=no_action
+
+. scripts/fm_action.inc
+
+case "$mode" in
+	"fuse")
+
+		fuse_action $*
+		;;
+	*)
+		 cd  $(dirname $0)/minix/minix/llvm  && ./clientctl  $mode $*
+		;;
+esac
+)

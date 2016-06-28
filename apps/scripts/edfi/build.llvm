@@ -1,0 +1,42 @@
+#!/bin/bash
+
+DIR=`dirname $0`
+ROOT=$DIR/../../..
+
+function rebuild_llvm {
+    find $ROOT/llvm/static/edfi/ctl/server $ROOT/llvm/shared/magic -name \*.[ch] -exec grep -l MAGIC_WITH_EDFI {} \; | xargs touch
+    CXXFLAGS="$1" make -C $ROOT/llvm/static/edfi/ctl/server/ install
+    CXXFLAGS="$1" make -C $ROOT/llvm/shared/magic/ install
+}
+
+
+if [ " $1" == " magic" ]; then
+    shift
+
+    if [ " $1" == " just_magic" ]; then
+        rebuild_llvm ""
+        ./relink.llvm magic
+        exit 0
+    fi
+
+    QPROF_OPTS_PREFIX="magic"
+
+    . ../scripts/qprof/build.llvm.inc
+
+    WRAP_UNBLOCKIFY_ARGS="-wrap-wrapper-map=unblockify_functions/$( qprof_llvm_deepest_ll_lib_regex __unbl_ )/__unbl_"
+
+    LLVM_PASS_ARGS="-magic-data-sections=^magic_data.*\$:^unblockify_data.*\$:^edfi_data.*\$ -magic-function-sections=^magic_functions.*\$:^edfi_functions\$:^unblockify_functions\$ -fault-skip-functions=magic_init -fault-modules=\/magic\/"
+    LLVM_PASS_ARGS="$LLVM_PASS_ARGS -fault-statistics-only=0 -fault-noDFLs=1 -fault-noDFTs=1 -fault-prob-default=0.05 -fault-rand-seed=1"
+
+    rebuild_llvm "-DMAGIC_WITH_EDFI=1"
+
+    ./relink.llvm magic edfi
+
+    if [ " $1" == " nowrap" ]; then
+        LLVM_PASS_ARGS="$LLVM_PASS_ARGS" ./build.llvm magic edfi
+    else
+        QPROF_SUMMARY_FILE="settings.llvm/qprof/qprof.summary.unblockify" LLVM_PASS_ARGS="$LLVM_PASS_ARGS $WRAP_UNBLOCKIFY_ARGS $( qprof_llvm_pass_args )" ./build.llvm wrap magic edfi
+    fi
+fi
+
+# TODO: Add support for simple EDFI builds

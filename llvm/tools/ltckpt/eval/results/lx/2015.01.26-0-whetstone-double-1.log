@@ -1,0 +1,270 @@
+COUNT|4040.202|0|MWIPS
+TIME|12.608
+Calibrate
+       0.00 Seconds          1   Passes (x 100)
+       0.01 Seconds          5   Passes (x 100)
+       0.05 Seconds         25   Passes (x 100)
+       0.25 Seconds        125   Passes (x 100)
+       1.23 Seconds        625   Passes (x 100)
+
+Use 5094  passes (x 100)
+
+          Double Precision C/C++ Whetstone Benchmark
+
+Loop content                  Result              MFLOPS      MOPS   Seconds
+
+N1 floating point     -1.12398255667391744      1545.366              0.063
+N2 floating point     -1.12187079889292241      1534.485              0.446
+N3 if then else        1.00000000000000000               10647.864    0.050
+N4 fixed point        12.00000000000000000               401152511.988    0.000
+N5 sin,cos etc.        0.49902937281518261                 113.907    3.721
+N6 floating point      0.99999987890802811       897.343              3.062
+N7 assignments         3.00000000000000000                5381.386    0.175
+N8 exp,sqrt etc.       0.75100163018453692                  37.218    5.092
+
+MWIPS                                           4040.202             12.608
+
+ELAPSED|15|s
+COUNT|4015.634|0|MWIPS
+TIME|12.683
+Calibrate
+       0.00 Seconds          1   Passes (x 100)
+       0.02 Seconds          5   Passes (x 100)
+       0.05 Seconds         25   Passes (x 100)
+       0.25 Seconds        125   Passes (x 100)
+       1.23 Seconds        625   Passes (x 100)
+
+Use 5093  passes (x 100)
+
+          Double Precision C/C++ Whetstone Benchmark
+
+Loop content                  Result              MFLOPS      MOPS   Seconds
+
+N1 floating point     -1.12398255667391744      1545.411              0.063
+N2 floating point     -1.12187079889292241      1461.980              0.468
+N3 if then else        1.00000000000000000               10060.223    0.052
+N4 fixed point        12.00000000000000000               401073759.988    0.000
+N5 sin,cos etc.        0.49902937281518261                 112.995    3.750
+N6 floating point      0.99999987890802811       887.123              3.097
+N7 assignments         3.00000000000000000                5381.868    0.175
+N8 exp,sqrt etc.       0.75100163018453692                  37.314    5.077
+
+MWIPS                                           4015.634             12.683
+
+ELAPSED|55|s
+COUNT|4042.440|0|MWIPS
+TIME|12.601
+Calibrate
+       0.00 Seconds          1   Passes (x 100)
+       0.01 Seconds          5   Passes (x 100)
+       0.05 Seconds         25   Passes (x 100)
+       0.25 Seconds        125   Passes (x 100)
+       1.23 Seconds        625   Passes (x 100)
+
+Use 5094  passes (x 100)
+
+          Double Precision C/C++ Whetstone Benchmark
+
+Loop content                  Result              MFLOPS      MOPS   Seconds
+
+N1 floating point     -1.12398255667391744      1545.266              0.063
+N2 floating point     -1.12187079889292241      1534.716              0.446
+N3 if then else        1.00000000000000000               10653.673    0.049
+N4 fixed point        12.00000000000000000               534870015.925    0.000
+N5 sin,cos etc.        0.49902937281518261                 113.580    3.731
+N6 floating point      0.99999987890802811       897.319              3.062
+N7 assignments         3.00000000000000000                5381.232    0.175
+N8 exp,sqrt etc.       0.75100163018453692                  37.348    5.074
+
+MWIPS                                           4042.440             12.601
+
+ELAPSED|14|s
+COUNT|4035.705|0|MWIPS
+TIME|12.620
+Calibrate
+       0.00 Seconds          1   Passes (x 100)
+       0.02 Seconds          5   Passes (x 100)
+       0.05 Seconds         25   Passes (x 100)
+       0.25 Seconds        125   Passes (x 100)
+       1.23 Seconds        625   Passes (x 100)
+
+Use 5093  passes (x 100)
+
+          Double Precision C/C++ Whetstone Benchmark
+
+Loop content                  Result              MFLOPS      MOPS   Seconds
+
+N1 floating point     -1.12398255667391744      1545.304              0.063
+N2 floating point     -1.12187079889292241      1534.614              0.446
+N3 if then else        1.00000000000000000               10653.304    0.049
+N4 fixed point        12.00000000000000000               401073759.988    0.000
+N5 sin,cos etc.        0.49902937281518261                 113.491    3.734
+N6 floating point      0.99999987890802811       890.200              3.086
+N7 assignments         3.00000000000000000                5379.223    0.175
+N8 exp,sqrt etc.       0.75100163018453692                  37.395    5.066
+
+MWIPS                                           4035.705             12.620
+
+ELAPSED|15|s
+COUNT|4047.907|0|MWIPS
+TIME|12.584
+Calibrate
+       0.00 Seconds          1   Passes (x 100)
+       0.01 Seconds          5   Passes (x 100)
+       0.05 Seconds         25   Passes (x 100)
+       0.25 Seconds        125   Passes (x 100)
+       1.23 Seconds        625   Passes (x 100)
+
+Use 5094  passes (x 100)
+
+          Double Precision C/C++ Whetstone Benchmark
+
+Loop content                  Result              MFLOPS      MOPS   Seconds
+
+N1 floating point     -1.12398255667391744      1545.698              0.063
+N2 floating point     -1.12187079889292241      1534.888              0.446
+N3 if then else        1.00000000000000000               10654.319    0.049
+N4 fixed point        12.00000000000000000               401152511.988    0.000
+N5 sin,cos etc.        0.49902937281518261                 114.092    3.715
+N6 floating point      0.99999987890802811       897.367              3.062
+N7 assignments         3.00000000000000000                5380.832    0.175
+N8 exp,sqrt etc.       0.75100163018453692                  37.348    5.074
+
+MWIPS                                           4047.907             12.584
+
+ELAPSED|15|s
+COUNT|4169.311|0|MWIPS
+TIME|12.014
+Calibrate
+       0.01 Seconds          1   Passes (x 100)
+       0.02 Seconds          5   Passes (x 100)
+       0.05 Seconds         25   Passes (x 100)
+       0.25 Seconds        125   Passes (x 100)
+       1.25 Seconds        625   Passes (x 100)
+
+Use 5009  passes (x 100)
+
+          Double Precision C/C++ Whetstone Benchmark
+
+Loop content                  Result              MFLOPS      MOPS   Seconds
+
+N1 floating point     -1.12398255667391744      1545.451              0.062
+N2 floating point     -1.12187079889292241      1534.433              0.439
+N3 if then else        1.00000000000000000               10653.723    0.049
+N4 fixed point        12.00000000000000000               525945002.749    0.000
+N5 sin,cos etc.        0.49902937281518261                 111.875    3.725
+N6 floating point      0.99999987890802811       888.793              3.040
+N7 assignments         3.00000000000000000                5382.076    0.172
+N8 exp,sqrt etc.       0.75100163018453692                  41.158    4.527
+
+MWIPS                                           4169.311             12.014
+
+ELAPSED|54|s
+COUNT|4047.927|0|MWIPS
+TIME|12.584
+Calibrate
+       0.00 Seconds          1   Passes (x 100)
+       0.01 Seconds          5   Passes (x 100)
+       0.05 Seconds         25   Passes (x 100)
+       0.25 Seconds        125   Passes (x 100)
+       1.23 Seconds        625   Passes (x 100)
+
+Use 5094  passes (x 100)
+
+          Double Precision C/C++ Whetstone Benchmark
+
+Loop content                  Result              MFLOPS      MOPS   Seconds
+
+N1 floating point     -1.12398255667391744      1545.256              0.063
+N2 floating point     -1.12187079889292241      1534.829              0.446
+N3 if then else        1.00000000000000000               10644.854    0.050
+N4 fixed point        12.00000000000000000               534870016.084    0.000
+N5 sin,cos etc.        0.49902937281518261                 114.045    3.716
+N6 floating point      0.99999987890802811       897.368              3.062
+N7 assignments         3.00000000000000000                5382.770    0.175
+N8 exp,sqrt etc.       0.75100163018453692                  37.360    5.072
+
+MWIPS                                           4047.927             12.584
+
+ELAPSED|15|s
+COUNT|4046.066|0|MWIPS
+TIME|12.588
+Calibrate
+       0.00 Seconds          1   Passes (x 100)
+       0.01 Seconds          5   Passes (x 100)
+       0.05 Seconds         25   Passes (x 100)
+       0.25 Seconds        125   Passes (x 100)
+       1.23 Seconds        625   Passes (x 100)
+
+Use 5093  passes (x 100)
+
+          Double Precision C/C++ Whetstone Benchmark
+
+Loop content                  Result              MFLOPS      MOPS   Seconds
+
+N1 floating point     -1.12398255667391744      1545.228              0.063
+N2 floating point     -1.12187079889292241      1534.886              0.446
+N3 if then else        1.00000000000000000               10648.140    0.050
+N4 fixed point        12.00000000000000000               401073759.988    0.000
+N5 sin,cos etc.        0.49902937281518261                 113.739    3.726
+N6 floating point      0.99999987890802811       897.268              3.062
+N7 assignments         3.00000000000000000                5382.791    0.175
+N8 exp,sqrt etc.       0.75100163018453692                  37.393    5.067
+
+MWIPS                                           4046.066             12.588
+
+ELAPSED|15|s
+COUNT|4046.779|0|MWIPS
+TIME|12.588
+Calibrate
+       0.01 Seconds          1   Passes (x 100)
+       0.01 Seconds          5   Passes (x 100)
+       0.05 Seconds         25   Passes (x 100)
+       0.25 Seconds        125   Passes (x 100)
+       1.23 Seconds        625   Passes (x 100)
+
+Use 5094  passes (x 100)
+
+          Double Precision C/C++ Whetstone Benchmark
+
+Loop content                  Result              MFLOPS      MOPS   Seconds
+
+N1 floating point     -1.12398255667391744      1545.556              0.063
+N2 floating point     -1.12187079889292241      1534.864              0.446
+N3 if then else        1.00000000000000000               10649.370    0.050
+N4 fixed point        12.00000000000000000               401152511.988    0.000
+N5 sin,cos etc.        0.49902937281518261                 114.078    3.715
+N6 floating point      0.99999987890802811       896.056              3.066
+N7 assignments         3.00000000000000000                5382.032    0.175
+N8 exp,sqrt etc.       0.75100163018453692                  37.358    5.072
+
+MWIPS                                           4046.779             12.588
+
+ELAPSED|15|s
+COUNT|4016.655|0|MWIPS
+TIME|12.682
+Calibrate
+       0.00 Seconds          1   Passes (x 100)
+       0.01 Seconds          5   Passes (x 100)
+       0.05 Seconds         25   Passes (x 100)
+       0.25 Seconds        125   Passes (x 100)
+       1.23 Seconds        625   Passes (x 100)
+
+Use 5094  passes (x 100)
+
+          Double Precision C/C++ Whetstone Benchmark
+
+Loop content                  Result              MFLOPS      MOPS   Seconds
+
+N1 floating point     -1.12398255667391744      1545.468              0.063
+N2 floating point     -1.12187079889292241      1509.866              0.453
+N3 if then else        1.00000000000000000               10648.939    0.050
+N4 fixed point        12.00000000000000000               401152511.988    0.000
+N5 sin,cos etc.        0.49902937281518261                 113.244    3.743
+N6 floating point      0.99999987890802811       887.040              3.098
+N7 assignments         3.00000000000000000                5377.113    0.175
+N8 exp,sqrt etc.       0.75100163018453692                  37.151    5.101
+
+MWIPS                                           4016.655             12.682
+
+ELAPSED|55|s

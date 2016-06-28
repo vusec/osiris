@@ -1,0 +1,13 @@
+Index: tools/lto/LTOCodeGenerator.cpp
+===================================================================
+--- tools/lto/LTOCodeGenerator.cpp	(revision 264579)
++++ tools/lto/LTOCodeGenerator.cpp	(working copy)
+@@ -189,7 +189,7 @@
+   }
+ 
+   _nativeObjectPath = uniqueObjPath.str();
+-  *name = _nativeObjectPath.c_str();
++  *name = strdup(_nativeObjectPath.c_str());
+   return false;
+ }
+ 

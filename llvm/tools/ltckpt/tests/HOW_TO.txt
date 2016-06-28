@@ -1,0 +1,38 @@
+Memory:
+RESULTS_CMD="scp -r %RESULTS_DIR% cgiuffr@giuffrida.few.vu.nl:archive/cloud/memory" BATCH_SIZE=5 SKIP_RECOMPILE_LIBS_STEP=1 ./test_by_run.sh 1 11 memory/test.sh
+(cd memory && EDFI_DRY_RUN=0 RECOMPILE_LIBS=0 EDFI_AGGREGATE_RUNS_FROM_DIRS="`find /home/$USER/archive/cloud/memory/ -maxdepth 1 -mindepth 1 -name \*run_id\* -type d | xargs | sed 's/ /:/g'`" ./test.sh)
+Alternative:
+(cd memory && EDFI_DRY_RUN=0 EDFI_FIRST_RUN_ID=1 EDFI_LAST_RUN_ID=11 ./test.sh &> test.log)
+
+Performance:
+RESULTS_CMD="scp -r %RESULTS_DIR% cgiuffr@giuffrida.few.vu.nl:archive/cloud/performance" BATCH_SIZE=5 SKIP_RECOMPILE_LIBS_STEP=1 ./test_by_run.sh 1 11 performance/test.sh
+(cd performance && EDFI_DRY_RUN=0 RECOMPILE_LIBS=0 EDFI_AGGREGATE_RUNS_FROM_DIRS="`find /home/$USER/archive/cloud/performance/ -maxdepth 1 -mindepth 1 -name \*run_id\* -type d | xargs | sed 's/ /:/g'`" ./test.sh)
+
+(cd performance && EDFI_DRY_RUN=0 DO_BITMAP=0 RECOMPILE_LIBS=0 EDFI_AGGREGATE_RUNS_FROM_DIRS="`find $( pwd ) -maxdepth 1 -mindepth 1 -name \*run_id\* -type d | xargs | sed 's/ /:/g'`" ./test.sh)
+
+APP_NAMES="nginx lighttpd httpd vsftpd proftpd pureftpd postgresql bind" SKIP_RECOMPILE_LIBS_STEP=1 DO_BITMAP=0 ./test_by_run.sh 1 11 performance/test.sh
+
+LOCS:
+(cd locs && EDFI_DRY_RUN=0 ./test.sh)
+
+Notes:
+#
+# - APP_NAMES="nginx lighttpd httpd" to be used to test only web servers.
+# - BATCH_SIZE="5" batches 5 runs at the time, 0 batches all of them. Shortest batch first policy.
+#
+
+*****************************
+Quick memo (32-bit):
+*****************************
+APP_NAMES="nginx lighttpd httpd vsftpd proftpd pureftpd postgresql bind" BATCH_SIZE=0 SKIP_RECOMPILE_LIBS_STEP=1 ./test_by_run.sh 1 1 performance/test.sh #Add DO_BITMAP=0 if prctl is broken
+APP_NAMES="nginx lighttpd httpd vsftpd proftpd pureftpd postgresql bind" BATCH_SIZE=0 SKIP_RECOMPILE_LIBS_STEP=1 ./test_by_run.sh 1 1 memory/test.sh      #Add DO_BITMAP=0 if prctl is broken
+APP_NAMES="spec" DO_FORK=0 DO_MPROTECT=0 DO_SOFTDIRTY=0 SKIP_RECOMPILE_LIBS_STEP=1 ./test_by_run.sh 1 1 performance/test.sh                               #Add CP_PRCTL=0 if prctl is broken
+
+*****************************
+Quick memo (64-bit):
+*****************************
+APP_NAMES="nginx lighttpd httpd vsftpd proftpd pureftpd postgresql bind" BATCH_SIZE=0 SKIP_RECOMPILE_LIBS_STEP=1 ./test_by_run.sh 1 1 performance/test.sh
+APP_NAMES="nginx lighttpd httpd vsftpd proftpd pureftpd postgresql bind" BATCH_SIZE=0 SKIP_RECOMPILE_LIBS_STEP=1 ./test_by_run.sh 1 1 perf_counters/test.sh
+APP_NAMES="nginx lighttpd httpd vsftpd proftpd pureftpd postgresql bind" BATCH_SIZE=0 SKIP_RECOMPILE_LIBS_STEP=1 ./test_by_run.sh 1 1 memory/test.sh
+APP_NAMES="spec" DO_FORK=0 DO_MPROTECT=0 DO_SOFTDIRTY=0 SKIP_RECOMPILE_LIBS_STEP=1 ./test_by_run.sh 1 1 performance/test.sh
+

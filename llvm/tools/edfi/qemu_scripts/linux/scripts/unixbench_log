@@ -1,0 +1,94 @@
+make all
+make[1]: Entering directory `/home/skl/unixbench'
+Checking distribution of files
+./pgms  exists
+./src  exists
+./testdir  exists
+./tmp  exists
+./results  exists
+make[1]: Leaving directory `/home/skl/unixbench'
+sh: 1: 3dinfo: not found
+
+   #    #  #    #  #  #    #          #####   ######  #    #   ####   #    #
+   #    #  ##   #  #   #  #           #    #  #       ##   #  #    #  #    #
+   #    #  # #  #  #    ##            #####   #####   # #  #  #       ######
+   #    #  #  # #  #    ##            #    #  #       #  # #  #       #    #
+   #    #  #   ##  #   #  #           #    #  #       #   ##  #    #  #    #
+    ####   #    #  #  #    #          #####   ######  #    #   ####   #    #
+
+   Version 5.1.2                      Based on the Byte Magazine Unix Benchmark
+
+   Multi-CPU version                  Version 5 revisions by Ian Smith,
+                                      Sunnyvale, CA, USA
+   December 22, 2007                  johantheghost at yahoo period com
+
+
+1 x Dhrystone 2 using register variables  1 2 3 4 5 6
+
+1 x Double-Precision Whetstone  1 2 3 4 5 6
+
+1 x Execl Throughput  1 2
+
+1 x File Copy 1024 bufsize 2000 maxblocks  1 2
+
+1 x File Copy 256 bufsize 500 maxblocks  1 2
+
+1 x File Copy 4096 bufsize 8000 maxblocks  1 2
+
+1 x Pipe Throughput  1 2 3 4 5 6
+
+1 x Pipe-based Context Switching  1 2 3 4 5 6
+
+1 x Process Creation  1 2
+
+1 x System Call Overhead  1 2 3 4 5 6
+
+1 x Shell Scripts (1 concurrent)  1 2
+
+1 x Shell Scripts (8 concurrent)  1 2
+
+========================================================================
+   BYTE UNIX Benchmarks (Version 5.1.2)
+
+   System: hdep: GNU/Linux
+   OS: GNU/Linux -- 3.11.0-rc4-llvm-lto+ -- #21 SMP Sat Jul 12 19:49:28 CEST 2014
+   Machine: i686 (i386)
+   Language: en_US.utf8 (charmap="UTF-8", collate="UTF-8")
+   CPU 0: QEMU Virtual CPU version 2.0.0 (4988.3 bogomips)
+          MMX, Physical Address Ext, SYSENTER/SYSEXIT
+   21:02:34 up 27 min,  1 user,  load average: 0.03, 0.92, 0.90; runlevel 2
+
+------------------------------------------------------------------------
+Benchmark Run: Sat Jul 12 2014 21:02:34 - 21:20:58
+1 CPU in system; running 1 parallel copy of tests
+
+Dhrystone 2 using register variables       19150808.0 lps   (10.0 s, 4 samples)
+Double-Precision Whetstone                     3079.9 MWIPS (10.1 s, 4 samples)
+Execl Throughput                               1318.4 lps   (29.5 s, 2 samples)
+File Copy 1024 bufsize 2000 maxblocks        126740.0 KBps  (30.0 s, 2 samples)
+File Copy 256 bufsize 500 maxblocks           32761.2 KBps  (30.0 s, 2 samples)
+File Copy 4096 bufsize 8000 maxblocks        452162.5 KBps  (30.0 s, 2 samples)
+Pipe Throughput                              287443.7 lps   (10.0 s, 4 samples)
+Pipe-based Context Switching                  46254.2 lps   (10.0 s, 4 samples)
+Process Creation                               3913.8 lps   (30.0 s, 2 samples)
+Shell Scripts (1 concurrent)                   3069.9 lpm   (60.0 s, 2 samples)
+Shell Scripts (8 concurrent)                    402.4 lpm   (60.1 s, 2 samples)
+System Call Overhead                        1482815.7 lps   (10.0 s, 4 samples)
+
+System Benchmarks Index Values               BASELINE       RESULT    INDEX
+Dhrystone 2 using register variables         116700.0   19150808.0   1641.0
+Double-Precision Whetstone                       55.0       3079.9    560.0
+Execl Throughput                                 43.0       1318.4    306.6
+File Copy 1024 bufsize 2000 maxblocks          3960.0     126740.0    320.1
+File Copy 256 bufsize 500 maxblocks            1655.0      32761.2    198.0
+File Copy 4096 bufsize 8000 maxblocks          5800.0     452162.5    779.6
+Pipe Throughput                               12440.0     287443.7    231.1
+Pipe-based Context Switching                   4000.0      46254.2    115.6
+Process Creation                                126.0       3913.8    310.6
+Shell Scripts (1 concurrent)                     42.4       3069.9    724.0
+Shell Scripts (8 concurrent)                      6.0        402.4    670.7
+System Call Overhead                          15000.0    1482815.7    988.5
+                                                                   ========
+System Benchmarks Index Score                                         441.9
+
+/hot/scripts

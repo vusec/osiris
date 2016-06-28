@@ -1,0 +1,5 @@
+LLVMPREFIX=${LLVMBASEDIR}/llvm-3.4/bin
+LLVMGOLD_LINK=""
+LLVMGOLD_CC="${LLVMGOLD_PREFIX}/bin/clang -flto"
+LLVMGOLD_CXX="${LLVMGOLD_PREFIX}/bin/clang++ -flto"
+

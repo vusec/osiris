@@ -1,0 +1,572 @@
+Index: tools/llvm-diff/DiffConsumer.cpp
+===================================================================
+--- tools/llvm-diff/DiffConsumer.cpp	(revision 241574)
++++ tools/llvm-diff/DiffConsumer.cpp	(working copy)
+@@ -15,6 +15,8 @@
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/IR/Module.h"
+ #include "llvm/Support/ErrorHandling.h"
++#include <iostream>
++#include <sstream>
+ 
+ using namespace llvm;
+ 
+@@ -96,35 +98,38 @@
+   for (SmallVectorImpl<DiffContext>::iterator
+          I = contexts.begin(), E = contexts.end(); I != E; ++I) {
+     if (I->Differences) continue;
+-    if (isa<Function>(I->L)) {
+-      // Extra newline between functions.
+-      if (Differences) out << "\n";
+ 
+-      Function *L = cast<Function>(I->L);
+-      Function *R = cast<Function>(I->R);
+-      if (L->getName() != R->getName())
+-        out << "in function " << L->getName()
+-            << " / " << R->getName() << ":\n";
+-      else
+-        out << "in function " << L->getName() << ":\n";
+-    } else if (isa<BasicBlock>(I->L)) {
+-      BasicBlock *L = cast<BasicBlock>(I->L);
+-      BasicBlock *R = cast<BasicBlock>(I->R);
+-      if (L->hasName() && R->hasName() && L->getName() == R->getName())
+-        out << "  in block %" << L->getName() << ":\n";
+-      else {
+-        out << "  in block ";
+-        printValue(L, true);
++    if (!usesStats()) {
++      if (isa<Function>(I->L)) {
++        // Extra newline between functions.
++        if (Differences) out << "\n";
++
++        Function *L = cast<Function>(I->L);
++        Function *R = cast<Function>(I->R);
++        if (L->getName() != R->getName())
++          out << "in function " << L->getName()
++              << " / " << R->getName() << ":\n";
++        else
++          out << "in function " << L->getName() << ":\n";
++      } else if (isa<BasicBlock>(I->L)) {
++        BasicBlock *L = cast<BasicBlock>(I->L);
++        BasicBlock *R = cast<BasicBlock>(I->R);
++        if (L->hasName() && R->hasName() && L->getName() == R->getName())
++          out << "  in block %" << L->getName() << ":\n";
++        else {
++          out << "  in block ";
++          printValue(L, true);
++          out << " / ";
++          printValue(R, false);
++          out << ":\n";
++        }
++      } else if (isa<Instruction>(I->L)) {
++        out << "    in instruction ";
++        printValue(I->L, true);
+         out << " / ";
+-        printValue(R, false);
++        printValue(I->R, false);
+         out << ":\n";
+       }
+-    } else if (isa<Instruction>(I->L)) {
+-      out << "    in instruction ";
+-      printValue(I->L, true);
+-      out << " / ";
+-      printValue(I->R, false);
+-      out << ":\n";
+     }
+ 
+     I->Differences = true;
+@@ -153,62 +158,189 @@
+ 
+ void DiffConsumer::log(StringRef text) {
+   header();
+-  indent();
+-  out << text << '\n';
++  if (!usesStats()) {
++    indent();
++    out << text << '\n';
++  }
+ }
+ 
+ void DiffConsumer::logf(const LogBuilder &Log) {
+   header();
+-  indent();
++  if (!usesStats()) {
++    indent();
+ 
+-  unsigned arg = 0;
++    unsigned arg = 0;
+ 
+-  StringRef format = Log.getFormat();
+-  while (true) {
+-    size_t percent = format.find('%');
+-    if (percent == StringRef::npos) {
+-      out << format;
+-      break;
+-    }
+-    assert(format[percent] == '%');
++    StringRef format = Log.getFormat();
++    while (true) {
++      size_t percent = format.find('%');
++      if (percent == StringRef::npos) {
++        out << format;
++        break;
++      }
++      assert(format[percent] == '%');
+ 
+-    if (percent > 0) out << format.substr(0, percent);
++      if (percent > 0) out << format.substr(0, percent);
+ 
+-    switch (format[percent+1]) {
+-    case '%': out << '%'; break;
+-    case 'l': printValue(Log.getArgument(arg++), true); break;
+-    case 'r': printValue(Log.getArgument(arg++), false); break;
+-    default: llvm_unreachable("unknown format character");
++      switch (format[percent+1]) {
++      case '%': out << '%'; break;
++      case 'l': printValue(Log.getArgument(arg++), true); break;
++      case 'r': printValue(Log.getArgument(arg++), false); break;
++      default: llvm_unreachable("unknown format character");
++      }
++
++      format = format.substr(percent+2);
+     }
+ 
+-    format = format.substr(percent+2);
++    out << '\n';
+   }
+-
+-  out << '\n';
+ }
+ 
+ void DiffConsumer::logd(const DiffLogBuilder &Log) {
+   header();
++  if (!usesStats()) {
+ 
+-  for (unsigned I = 0, E = Log.getNumLines(); I != E; ++I) {
+-    indent();
+-    switch (Log.getLineKind(I)) {
+-    case DC_match:
+-      out << "  ";
+-      Log.getLeft(I)->dump();
+-      //printValue(Log.getLeft(I), true);
++    for (unsigned I = 0, E = Log.getNumLines(); I != E; ++I) {
++      indent();
++      switch (Log.getLineKind(I)) {
++      case DC_match:
++        out << "  ";
++        Log.getLeft(I)->dump();
++        //printValue(Log.getLeft(I), true);
++        break;
++      case DC_left:
++        out << "< ";
++        Log.getLeft(I)->dump();
++        //printValue(Log.getLeft(I), true);
++        break;
++      case DC_right:
++        out << "> ";
++        Log.getRight(I)->dump();
++        //printValue(Log.getRight(I), false);
++        break;
++      }
++      //out << "\n";
++    }
++  }
++}
++
++bool DiffConsumer::usesStats() const {
++  return forceUsingStats or statsFile.is_open() ;
++}
++void DiffConsumer::resetDifferences() {
++  Differences = false;
++}
++
++void DiffConsumer::addFunction(ActionType type, std::string name) {
++  switch (type) {
++    case ADDED:
++    case DELETED:
++    case UNCHANGED:
++    case MODIFIED:
++    case RENAMED:
++      functions[type].push_back(name);
+       break;
+-    case DC_left:
+-      out << "< ";
+-      Log.getLeft(I)->dump();
+-      //printValue(Log.getLeft(I), true);
++    default:
++      assert(false && "unrecognised action type");
++  }
++}
++
++void DiffConsumer::addPrevName(std::string current, std::string prev) {
++  prevNames[current] = prev;
++}
++
++std::vector<std::string>* DiffConsumer::getFunctions(ActionType type) {
++  return &functions[type];
++}
++
++std::string DiffConsumer::convertActionType(const int type) {
++  switch (type) {
++    case ADDED:
++      return "added";
++    case DELETED:
++      return "deleted";
++    case UNCHANGED:
++      return "unchanged";
++    case MODIFIED:
++      return "modified";
++    case RENAMED:
++      return "renamed";
++    case UNKNOWN:
++      return "unknown";
++    default:
++      assert(false && "unrecognised action type");
++  }
++}
++
++std::string DiffConsumer::convertStatsType(const int stat) {
++  switch (stat) {
++    case NAMES:
++      return "name";
++    case STATS:
++      return "stat";
++    default:
++      assert(false && "unrecognised stat type");
++  }
++}
++
++std::string DiffConsumer::getStatsPerType(const int type, const int stat) {
++  std::string line;
++
++  line.append(convertStatsType(stat));
++  line.append("-");
++  line.append(convertActionType(type));
++  line.append(" = ");
++
++  std::vector<std::string> names = functions[type];
++  std::vector<std::string>::iterator ni = names.begin(),
++                                     ne = names.end();
++  switch (stat) {
++    case NAMES:
++      {
++        bool isFirst = true;
++        for(; ni != ne; ++ni) {
++          line.append((!isFirst) ? "," : "");
++          if (type == DiffConsumer::RENAMED) {
++            std::string prevName = prevNames[*ni];
++            line.append("[");
++            line.append(prevName);
++            line.append(",");
++            line.append(*ni);
++            line.append("]");
++          } else {
++            line.append(*ni);
++          }
++          isFirst=false;
++        }
++      }
+       break;
+-    case DC_right:
+-      out << "> ";
+-      Log.getRight(I)->dump();
+-      //printValue(Log.getRight(I), false);
++    case STATS:
++      std::stringstream ss;
++      ss << names.size();
++      line.append(ss.str());
+       break;
+-    }
+-    //out << "\n";
+   }
++
++  return line;
+ }
++
++void DiffConsumer::printStats() {
++
++  statsFile << "[llvm-names]" << std::endl;
++  statsFile <<  getStatsPerType(ADDED, NAMES) << std::endl;
++  statsFile <<  getStatsPerType(DELETED, NAMES) << std::endl;
++  statsFile <<  getStatsPerType(UNCHANGED, NAMES) << std::endl;
++  statsFile <<  getStatsPerType(MODIFIED, NAMES) << std::endl;
++  statsFile <<  getStatsPerType(RENAMED, NAMES) << std::endl;
++  statsFile <<  getStatsPerType(UNKNOWN, NAMES) << std::endl;
++
++  statsFile << std::endl;
++
++  statsFile << "[llvm-stats]" << std::endl;
++  statsFile <<  getStatsPerType(ADDED, STATS) << std::endl;
++  statsFile <<  getStatsPerType(DELETED, STATS) << std::endl;
++  statsFile <<  getStatsPerType(UNCHANGED, STATS) << std::endl;
++  statsFile <<  getStatsPerType(MODIFIED, STATS) << std::endl;
++  statsFile <<  getStatsPerType(RENAMED, STATS) << std::endl;
++  statsFile <<  getStatsPerType(UNKNOWN, STATS) << std::endl;
++}
+Index: tools/llvm-diff/DiffConsumer.h
+===================================================================
+--- tools/llvm-diff/DiffConsumer.h	(revision 241574)
++++ tools/llvm-diff/DiffConsumer.h	(working copy)
+@@ -20,6 +20,9 @@
+ #include "llvm/ADT/StringRef.h"
+ #include "llvm/Support/Casting.h"
+ #include "llvm/Support/raw_ostream.h"
++#include <map>
++#include <vector>
++#include <fstream>
+ 
+ namespace llvm {
+   class Module;
+@@ -70,14 +73,34 @@
+     bool Differences;
+     unsigned Indent;
+ 
++    std::ofstream statsFile;
++    std::map<const int, std::vector<std::string> > functions;
++    std::map<std::string, std::string> prevNames;
++    bool forceUsingStats;
++
+     void printValue(Value *V, bool isL);
+     void header();
+     void indent();
+ 
++    std::string convertActionType(const int type);
++    std::string convertStatsType(const int stat);
++    std::string getStatsPerType(const int type, const int stat);
++
+   public:
+-    DiffConsumer()
+-      : out(errs()), Differences(false), Indent(0) {}
++    DiffConsumer(const std::string stats)
++      : out(errs()), Differences(false), Indent(0), forceUsingStats(false) {
++      statsFile.open(stats.c_str(), std::fstream::app);
++    }
+ 
++    DiffConsumer() : out(errs()), Differences(false), Indent(0), forceUsingStats(true) { }
++
++    ~DiffConsumer() {
++      statsFile.close();
++    }
++
++    enum ActionType {ADDED, DELETED, UNCHANGED, MODIFIED, RENAMED, UNKNOWN };
++    enum StatsType {NAMES, STATS};
++
+     bool hadDifferences() const;
+     void enterContext(Value *L, Value *R);
+     void exitContext();
+@@ -84,6 +107,13 @@
+     void log(StringRef text);
+     void logf(const LogBuilder &Log);
+     void logd(const DiffLogBuilder &Log);
++
++    bool usesStats() const;
++    void resetDifferences();
++    void printStats();
++    void addFunction(ActionType type, std::string name);
++    void addPrevName(std::string current, std::string prev);
++    std::vector<std::string>* getFunctions(ActionType type);
+   };
+ }
+ 
+Index: tools/llvm-diff/DifferenceEngine.cpp
+===================================================================
+--- tools/llvm-diff/DifferenceEngine.cpp	(revision 241574)
++++ tools/llvm-diff/DifferenceEngine.cpp	(working copy)
+@@ -28,6 +28,7 @@
+ #include "llvm/Support/raw_ostream.h"
+ #include "llvm/Support/type_traits.h"
+ #include <utility>
++#include <iostream>
+ 
+ using namespace llvm;
+ 
+@@ -204,8 +205,16 @@
+       // If the instructions differ, start the more sophisticated diff
+       // algorithm at the start of the block.
+       if (diff(LeftI, RightI, false, false)) {
+-        TentativeValues.clear();
+-        return runBlockDiff(L->begin(), R->begin());
++        if (Engine.getConsumer().usesStats()) {
++          DiffLogBuilder Diff(Engine.getConsumer());
++          Diff.addLeft(LeftI);
++          Diff.addRight(RightI);
++          TentativeValues.clear();
++          return;
++        } else {
++          TentativeValues.clear();
++          return runBlockDiff(L->begin(), R->begin());
++        }
+       }
+ 
+       // Otherwise, tentatively unify them.
+@@ -660,21 +669,70 @@
+ 
+     if (Function *RFn = R->getFunction(LFn->getName()))
+       Queue.push_back(std::make_pair(LFn, RFn));
+-    else
++    else {
+       logf("function %l exists only in left module") << LFn;
++      consumer.addFunction(DiffConsumer::DELETED, LFn->getName().str());
++    }
+   }
+ 
+   for (Module::iterator I = R->begin(), E = R->end(); I != E; ++I) {
+     Function *RFn = &*I;
+-    if (!LNames.count(RFn->getName()))
++    if (!LNames.count(RFn->getName())) {
+       logf("function %r exists only in right module") << RFn;
++      consumer.addFunction(DiffConsumer::ADDED, RFn->getName().str());
++    }
+   }
+ 
+   for (SmallVectorImpl<std::pair<Function*,Function*> >::iterator
+-         I = Queue.begin(), E = Queue.end(); I != E; ++I)
++         I = Queue.begin(), E = Queue.end(); I != E; ++I) {
+     diff(I->first, I->second);
++
++    if (consumer.hadDifferences()) {
++      consumer.addFunction(DiffConsumer::MODIFIED, I->first->getName().str());
++      consumer.resetDifferences();
++    } else {
++      consumer.addFunction(DiffConsumer::UNCHANGED, I->first->getName().str());
++    }
++  }
+ }
+ 
++void DifferenceEngine::diffRenamed(Module *L, Module *R) {
++  std::vector<std::string> *deleted =
++    consumer.getFunctions(DiffConsumer::DELETED);
++  std::vector<std::string> *added =
++    consumer.getFunctions(DiffConsumer::ADDED);
++  std::vector<std::string>::iterator delit = deleted->begin(),
++                                     delet = deleted->end();
++  std::vector<std::vector<std::string>::iterator> marked;
++
++  for (; delit != delet ; ++delit) {
++    std::string delname = *delit;
++    Function *delfunc = L->getFunction(delname);
++    std::vector<std::string>::iterator addit = added->begin(),
++                                       addet = added->end();
++    for (; addit != addet ; ++addit) {
++      std::string addname = *addit;
++      Function *addfunc = R->getFunction(addname);
++
++      consumer.resetDifferences();
++      diff(delfunc, addfunc);
++
++      if (!consumer.hadDifferences()) {
++        consumer.addFunction(DiffConsumer::RENAMED, addname);
++        consumer.addPrevName(addname, delname);
++
++        added->erase(addit);
++        marked.push_back(delit);
++        break;
++      }
++    }
++  }
++
++  for (unsigned int i =0; i < marked.size(); ++i) deleted->erase(marked[i]);
++}
++
++
++
+ bool DifferenceEngine::equivalentAsOperands(GlobalValue *L, GlobalValue *R) {
+   if (globalValueOracle) return (*globalValueOracle)(L, R);
+   return L->getName() == R->getName();
+Index: tools/llvm-diff/DifferenceEngine.h
+===================================================================
+--- tools/llvm-diff/DifferenceEngine.h	(revision 241574)
++++ tools/llvm-diff/DifferenceEngine.h	(working copy)
+@@ -15,6 +15,8 @@
+ #ifndef _LLVM_DIFFERENCE_ENGINE_H_
+ #define _LLVM_DIFFERENCE_ENGINE_H_
+ 
++#define PATCHED_FOR_SBINDIFFY
++
+ #include "DiffConsumer.h"
+ #include "DiffLog.h"
+ #include "llvm/ADT/SmallVector.h"
+@@ -58,11 +60,12 @@
+       virtual ~Oracle() {}
+     };
+ 
+-    DifferenceEngine(Consumer &consumer)
++    DifferenceEngine(DiffConsumer &consumer)
+       : consumer(consumer), globalValueOracle(0) {}
+ 
+     void diff(Module *L, Module *R);
+     void diff(Function *L, Function *R);
++    void diffRenamed(Module *L, Module *R);
+     void log(StringRef text) {
+       consumer.log(text);
+     }
+@@ -69,7 +72,7 @@
+     LogBuilder logf(StringRef text) {
+       return LogBuilder(consumer, text);
+     }
+-    Consumer& getConsumer() const { return consumer; }
++    DiffConsumer& getConsumer() const { return consumer; }
+ 
+     /// Installs an oracle to decide whether two global values are
+     /// equivalent as operands.  Without an oracle, global values are
+@@ -83,8 +86,8 @@
+     bool equivalentAsOperands(GlobalValue *L, GlobalValue *R);
+ 
+   private:
+-    Consumer &consumer;
+-    Oracle *globalValueOracle;
++  DiffConsumer &consumer;
++  Oracle *globalValueOracle;
+   };
+ }
+ 
+Index: tools/llvm-diff/llvm-diff.cpp
+===================================================================
+--- tools/llvm-diff/llvm-diff.cpp	(revision 241574)
++++ tools/llvm-diff/llvm-diff.cpp	(working copy)
+@@ -26,6 +26,7 @@
+ #include "llvm/Support/raw_ostream.h"
+ #include <string>
+ #include <utility>
++#include <iostream>
+ 
+ 
+ using namespace llvm;
+@@ -57,6 +58,13 @@
+     errs() << "No function named @" << Name << " in right module\n";
+ }
+ 
++static cl::opt<bool> Renamed("renamed",
++                             cl::desc("detect renamed functions and include "
++                                      "them in the statistics"));
++static cl::opt<std::string> Stats("stats",
++                                  cl::desc("Specify very to put diffing "
++                                           "statistics"),
++                                  cl::value_desc("filename"));
+ static cl::opt<std::string> LeftFilename(cl::Positional,
+                                          cl::desc("<first file>"),
+                                          cl::Required);
+@@ -76,7 +84,7 @@
+   Module *RModule = ReadModule(Context, RightFilename);
+   if (!LModule || !RModule) return 1;
+ 
+-  DiffConsumer Consumer;
++  DiffConsumer Consumer(Stats);
+   DifferenceEngine Engine(Consumer);
+ 
+   // If any global names were given, just diff those.
+@@ -87,10 +95,14 @@
+   // Otherwise, diff everything in the module.
+   } else {
+     Engine.diff(LModule, RModule);
++    if (!Stats.empty() && Renamed)
++      Engine.diffRenamed(LModule, RModule);
+   }
+ 
+   delete LModule;
+   delete RModule;
+ 
++  if (!Stats.empty()) Consumer.printStats();
++
+   return Consumer.hadDifferences();
+ }

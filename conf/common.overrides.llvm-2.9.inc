@@ -1,0 +1,2 @@
+LLVMPREFIX=${LLVMBASEDIR}/llvm-2.9/bin
+

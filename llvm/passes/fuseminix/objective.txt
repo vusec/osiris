@@ -1,0 +1,18 @@
+Thanks for explaining in detail. Following is a quick summary of what we discussed:
+
+1. Currently I have the bcl file formed by combining all opt.bcl files under obj.i386/servers. The names of functions/global variables are prefixed with "mx_<modulename>_" string.
+2. I could use InfoPass to fetch all callees for a particular function and so on. dsa_common.h has more such call-graph facilities.
+3. Next objective is to do the following:
+ 
+a. find all places where send_req() is called.
+
+b. find all places where sef_receive_status() is called.
+    1. Most likely these are all in a while(TRUE) loop. So, I could use getLoopFor() to get the basicBlock associated with this. 
+    2. make  a clone of such functions (llvm::cloneFunction) and do the following in each of such cloned functions: 
+           1. strip everything else to keep only the inner loop that handles the msg received.
+
+c. replace all calls to send_req()  with calls to all of the clone functions.
+
+Further on:
+The plan is to make it more precise by using the first and second arguments of sendreq(), first by identifying the endpoint and reducing 
+the no., of calls that replace sendreq() and then to use the second argument to connect the sendreq() call to specific case that the clone function has, finally to short-circuit the sendreq() calls to specific instructions that are executed upon sef_receive() at the other end.

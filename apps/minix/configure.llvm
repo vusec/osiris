@@ -1,0 +1,20 @@
+#!/bin/bash
+
+set -o errexit
+
+: ${MINIXBRANCH:=llvm_squashed_public}
+
+cd $(dirname $0)
+
+if [ ! -d minix ]; then
+    # Checkout directly the tree we want, as well as the correct branch
+    git clone -b "$MINIXBRANCH" https://github.com/vusec/minix-llvm.git minix
+fi
+
+export INTERACTIVE
+export ROOT=$( readlink -f ../.. )
+
+cd -
+cd $(dirname $0)/minix/minix/llvm
+
+./configure.llvm $*

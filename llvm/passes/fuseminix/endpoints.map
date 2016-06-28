@@ -1,0 +1,14 @@
+0 = pm
+1 = vfs
+2 = rs
+3 = mem
+4 = sched
+5 = tty
+6 = ds
+7 = mfs
+8 = vm
+9 = pfs
+101 = input
+102 = is
+103 = ipc
+104 = devman

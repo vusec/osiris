@@ -1,0 +1,11 @@
+########################################################
+# Overrides for MINIX distributed recovery project
+# 
+# History: Koustubha Bhat 16-7-2015
+########################################################
+
+# ltckpt static library flags
+DISTREC_SUICIDE_ONLY_ONCE="-DLTRC_SUICIDE_ONLY_ONCE"
+DISTREC_SUICIDE_WHEN_RECOVERABLE="-DLTRC_SUICIDE_WHEN_RECOVERABLE"
+
+DISTREC_CFLAGS="-D_MINIX_DISTRIBUTED_RECOVERY ${DISTREC_REHANDLE_REQUEST} ${DISTREC_SUICIDE_ONLY_ONCE} ${DISTREC_SUICIDE_WHEN_RECOVERABLE} ${DISTREC_SUICIDE_PERIODICALLY}"

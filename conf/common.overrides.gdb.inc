@@ -1,0 +1,5 @@
+LLVMGOLD_OPTFLAGS="-disable-internalize -disable-inlining -disable-opt"
+LLVMGOLD_LLCFLAGS+="-O=0"
+LLVMGOLD_LINKCOMMONFLAGS+="-O0"
+LLVMGOLD_CFLAGS+="-O0"
+LLVMGOLD_OPTIMIZED=0

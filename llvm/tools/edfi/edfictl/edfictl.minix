@@ -1,0 +1,3 @@
+#!/bin/sh
+
+service up `dirname $0`/edfictl -script /etc/rs.single -args "$*"

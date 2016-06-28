@@ -1,0 +1,245 @@
+#!/bin/sh
+
+# Mount ProXFS
+echo "Mounting ProXFS."
+mkdir -p /prox
+mount -t proxfs none /prox
+
+# Generate test script
+echo "Generating Test script"
+
+cat > /root/test.sh <<EOT
+#!/bin/sh
+
+# Configuration
+##############################################################################
+: \${servers="vm vfs pm rs ipc"}
+
+# print which fields per context?
+: \${print_fields="bb_in bb_out end ended_cumulative"}
+
+# Helper functions
+##############################################################################
+
+disable_stats() {
+	local s;
+
+	# Disable stats
+	for s in \$servers
+	do
+		echo disabling \$s
+		echo 0 > /prox/\$s/wprof_enable_stats
+	done
+}
+
+enable_stats() {
+	local s;
+
+	# Enable stats
+	for s in \$servers
+	do
+		echo enabling \$s
+		echo 1 > /prox/\$s/wprof_enable_stats
+	done
+
+}
+
+#collect_global_stats(server,log_prefix)
+collect_global_stats() {
+	local s=\$1
+	local label=\$2
+
+	local p
+	local f
+
+	for p in opt dfa pes
+	do
+		for field in \$print_fields
+		do
+			f=/prox/\$s/wprof/glo/\$p/\$field
+			echo -n \$label\$p \$(basename \$f):	>> /root/\$s.txt
+			cat \$f					>> /root/\$s.txt
+		done
+	done
+}
+
+#collect_stats(server,func_index,func_name,log_prefix)
+collect_stats() {
+	local s=\$1
+	local func=\$2
+	local funcname=\$3
+	local label=\$4
+
+	local p
+	local field
+	local f
+
+	for p in opt dfa pes
+	do
+		for field in \$print_fields
+		do
+			f=/prox/\$s/wprof/funcs/\$func/stats/\$p/\$field
+			echo -n \$label\$p \$(basename \$f):	>> /root/\$s.\$funcname.txt
+			cat \$f					>> /root/\$s.\$funcname.txt
+		done
+	done
+}
+
+pre_stats() {
+	local s
+	local func
+	local funcname
+
+	for s in \$servers
+	do
+		echo -n collecting from \$s
+
+		# Global stats
+		echo -n .
+		echo "Before \$@"				 > /root/\$s.txt
+		echo "---------------"				>> /root/\$s.txt
+		collect_global_stats \$s PRE:
+
+		# Per function stats
+		for func in \$(seq 1 500)
+		do
+			funcname=\$(cat /prox/\$s/wprof/funcs/\$func/funcname/.raw)
+			if [ -z "\$funcname" ]; then continue; fi
+
+			# Just so that we know stuff is happening
+			echo -n .
+			echo "Before \$@"			 > /root/\$s.\$funcname.txt
+			echo "---------------"			>> /root/\$s.\$funcname.txt
+
+			collect_stats \$s \$func \$funcname PRE:
+		done
+		echo
+	done
+}
+
+post_stats() {
+	for s in \$servers
+	do
+		echo -n collecting from \$s
+
+		# Global stats
+		echo -n .
+		echo						>> /root/\$s.txt
+		echo "After \$@"				>> /root/\$s.txt
+		echo "---------------"				>> /root/\$s.txt
+		collect_global_stats \$s POST:
+
+		# Per function stats
+		for func in \$(seq 1 500)
+		do
+			funcname=\$(cat /prox/\$s/wprof/funcs/\$func/funcname/.raw)
+			if [ -z "\$funcname" ]; then continue; fi
+			# Just so that we know stuff is happening
+			echo -n .
+			echo					>> /root/\$s.\$funcname.txt
+			echo "After \$@"			>> /root/\$s.\$funcname.txt
+			echo "---------------"			>> /root/\$s.\$funcname.txt
+
+			collect_stats \$s \$func \$funcname POST:
+		done
+		echo
+	done
+}
+
+# Do stuff
+##############################################################################
+
+if [ \$# -lt 1 ]
+then
+	echo "usage: \$0 <test command to execute>"
+	exit 1
+fi
+
+disable_stats
+
+# Reset Counters
+for s in \$servers
+do
+	echo Resetting counters for \$s
+	echo > /prox/\$s/wprof/.raw
+done
+
+pre_stats
+
+enable_stats
+
+(eval \$@)
+
+disable_stats
+
+post_stats
+
+EOT
+
+cat  > /root/report.sh <<EOT
+#!/bin/sh
+
+# Configuration
+##############################################################################
+: \${servers="vm vfs pm rs ipc"}
+
+for s in \$servers
+do
+for f in \$s.*
+do
+	DIFF=diff
+	fn=\$(basename \$f)
+
+	# Depends on \$fn
+	func=\$(echo \$fn | awk -F. '{ print \$2 }')
+	caller2=\$(echo \$func | awk -F, '{ print \$1 }')
+	caller1=\$(echo \$func | awk -F, '{ print \$2 }')
+	caller0=\$(echo \$func | awk -F, '{ print \$3 }')
+	infunc=\$(echo \$func | awk -F, '{ print \$4 }')
+	component=\$(echo \$fn | awk -F. '{ print \$1 }')
+
+	# Depends on \$component
+	component_fn=\`ls /boot/minix/.temp/*\${component} 2>/dev/null\`
+	if [ -n "\$func" ]
+	then
+		# Per function stats
+		if [ -f "\$component_fn" ]
+		then
+			# Binary file found, lookup function names
+			caller0_name=\`addr2line -e \$component_fn -f \$caller0 | head -1\`
+			caller1_name=\`addr2line -e \$component_fn -f \$caller1 | head -1\`
+			caller2_name=\`addr2line -e \$component_fn -f \$caller2 | head -1\`
+			func=\${caller2_name},\${caller1_name},\${caller0_name},\$infunc
+
+			#dir=copy/\$component/\${caller2_name}/\${caller1_name}/\${caller0_name}/
+			#mkdir -p \${dir}
+			#cp \$fn \${dir}/\${infunc}
+		fi
+
+		cat \$f | awk -F: '/^PRE/ { data[\$2] = \$3 } /^POST/ { print \$2" "(\$3 - data[\$2]); }' >\$DIFF
+
+		echo \[bb.in.window.percent.\$component.\$func\]
+		awk <\$DIFF '/ bb_in /{ia[\$1]=\$3} / bb_out /{oa[\$1]=\$3;l[n++]=\$1} END{for (c=0;c<n;c++) {i=ia[l[c]]; o=oa[l[c]]; print l[c]": "i / (i + o) * 100}}'
+		echo
+
+		echo \[bb.out.window.initiatedby.\$component.\$func\]
+		awk <\$DIFF '/ ended_cumulative / {print \$1": " \$3 }'
+		echo
+
+		echo \[windowcloses.\$component.\$func\]
+		awk <\$DIFF '/ end / {print \$1": " \$3 }'
+	else
+		# Global stats
+		cat \$f | awk -F: '/^PRE/ { data[\$2] = \$3 } /^POST/ { print \$2" "(\$3 - data[\$2]); }' >\$DIFF
+
+		echo \[bb.in.window.percent.\$component]
+		awk <\$DIFF '/ bb_in /{ia[\$1]=\$3} / bb_out /{oa[\$1]=\$3;l[n++]=\$1} END{for (c=0;c<n;c++) {i=ia[l[c]]; o=oa[l[c]]; print l[c]": "i / (i + o) * 100}}'
+		echo
+	fi
+	echo
+done
+done
+EOT
+
+chmod 755 /root/test.sh
+chmod 755 /root/report.sh
