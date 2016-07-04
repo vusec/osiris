@@ -106,10 +106,12 @@ Service Disruption Experiment
 Series of deterministic faults are injected into Process Manager and Unixbench test set is 
 run to demonstrate continuity of services in OSIRIS despite of constant onset of faults in 
 core OS components. This can be run by using the following mentioned script
+
 	cd apps/minix/scripts
 	MROOT=<path to apps/minix directory> ./osiris_demo.sh 
 
-The script supports several options viz., 
+The script supports several options viz.,
+ 
 	prepare - Builds the OS and sets up the demo
 	run 	- Initiates demo
 	graph   - Plots RS activity using gnuplot
@@ -134,6 +136,7 @@ Performance Evaluation
 
 perf-\*.sh files in apps/minix/scripts directory are for running Unixbench performance 
 experiments. Following are the mappings:
-	baseline - This is the bare MINIX 3 
-	ltckptrecovery - refers to OSIRIS checkpoint-recovery instrumentations
-	bbclone - One with recovery window aware checkpointing optimization
+
+*	baseline - This is the bare MINIX 3 
+*	ltckptrecovery - refers to OSIRIS checkpoint-recovery instrumentations
+*	bbclone - One with recovery window aware checkpointing optimization
