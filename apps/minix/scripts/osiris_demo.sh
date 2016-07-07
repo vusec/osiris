@@ -166,6 +166,8 @@ echo "Running Unixbench...   "
 export HYPER=print_progress
 RUNS_0=1 RUNS_1=0 RUNS_2=0 RUNS_3=0 RUNS_4=0 RUNS_5=0 RUNS_6=0 RUNS_7=0 RUNS_8=0 RUNS_9=1 RUNS_10=1 RUNS_11=0 ./run_bc
 
+# Show num suicides injected in PM
+kill -USR2 5
 tar cf /dev/c0d1 results/
 EOS2
 EOU
@@ -182,6 +184,8 @@ echo "Running MINIX Test set...   "
 export HYPER=console_print
 QUICKTEST=yes ./run < /dev/console || true
 echo "done."
+# Show num suicides injected in PM
+kill -USR2 5
 EOS3
 EOM
 		;;
@@ -198,8 +202,6 @@ EOM
 
 cat >> /root/drec_testset_${testset}.sh <<EOS4
 touch /root/done.testset
-# Show num suicides injected in PM
-kill -USR2 5
 #shutdown -pD now
 #poweroff
 EOS4
@@ -349,11 +351,10 @@ dual_pane_demo()
 
   tmux new-session -d -s "graph_session"  "cd $MROOT/scripts; MROOT=$MROOT ${PROG_NAME} graph "
   tmux new-session -d -s "OSIRIS-Demo"
-  # The horizontal splits way
-#  tmux split-window -v  -c "${MROOT}/scripts"  "MROOT=$MROOT ${PROG_NAME} start_os ref"\; \
-  tmux new-window -c "${MROOT}/scripts" "MROOT=$MROOT ${PROG_NAME} num_injected_faults"
-  tmux split-window -v -p 90 -c "${MROOT}/scripts"  "MROOT=$MROOT ${PROG_NAME} start_os ref"\; \
+  tmux new-window -n "num_inj_window" -c "${MROOT}/scripts" "MROOT=$MROOT ${PROG_NAME} num_injected_faults | grep --line-buffered 'faults:' --color=never; sh -i"
+  tmux split-window -v -p 80 -c "${MROOT}/scripts"  "MROOT=$MROOT ${PROG_NAME} start_os ref"\; \
        split-window -h -c "${MROOT}/scripts" "MROOT=$MROOT ${PROG_NAME} start_os fault"\; \
+	select-window -t "num_inj_window"\; \
        attach-session -d -t "OSIRIS-Demo"
 }
 
