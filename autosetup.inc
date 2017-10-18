@@ -191,13 +191,6 @@ if [ "$LLVMVERSION" = 3.3 -a ! -f .autosetup.patched-llvm3.3-objPath-use-after-f
 	cd "$LLVMDIR"
 	touch .autosetup.patched-llvm3.3-objPath-use-after-free.patch
 fi
-if [ ! -f .autosetup.patched-clang-r201729 ]; then
-	cd "$LLVMDIR/llvm/tools/clang"
-	svn diff -c 201729 http://llvm.org/svn/llvm-project/cfe/trunk > clang-r201729.patch
-	run patch -p0 < clang-r201729.patch
-	cd "$LLVMDIR"
-	touch .autosetup.patched-clang-r201729
-fi
 run mkdir -p "$LLVMDIR/llvm-objects" "$PATHLLVM/bin"
 cd "$LLVMDIR/llvm-objects"
 [ -f Makefile ] || run ../llvm/configure --prefix="$PATHLLVM/bin" --enable-bindings=none --disable-debug-symbols --enable-optimized --enable-assertions --enable-jit --with-binutils-include="$PATHAUTOPREFIX/include"
